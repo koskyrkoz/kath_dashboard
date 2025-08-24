@@ -179,17 +179,17 @@ with body[1]:
 
 # ==== RIGHT PANEL: renamed + columns + hide index ====
 with body[2]:
-    st.subheader("Product Occurrences (obs) & Variance (score)")
+    st.markdown("### Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
 
-    # map product_gr -> representative product_gr
-    map_en = (df.groupby("product_gr")["product_gr"]
-                .agg(lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]))
-    vr = vr.merge(map_en.rename("product_gr"), on="product_gr", how="left")
+    # Show Greek product names
+    vr_small = (
+        vr[["product_gr", "n_obs", "fluctuation_score"]]
+          .rename(columns={"product_gr": "product_gr", "n_obs": "obs", "fluctuation_score": "score"})
+    )
 
-    vr_small = (vr[["product_gr", "n_obs", "fluctuation_score"]]
-                  .rename(columns={"n_obs": "obs", "fluctuation_score": "score"}))
     st.dataframe(vr_small, use_container_width=True, height=500, hide_index=True)
+
 
 # ---- Counts by season + bar plot ----
 st.markdown("---")
