@@ -158,6 +158,15 @@ def _text_color_green_to_red(series: pd.Series):
             styles.append(f"color: rgb({r},{g},0)")
     return styles
 
+def _month_text_colors(s: pd.Series):
+    season_color = {
+        "Jan": "#4EA3E6", "Feb": "#4EA3E6", "Dec": "#4EA3E6",   # winter light blue-ish
+        "Mar": "#66C97A", "Apr": "#66C97A", "May": "#66C97A",   # spring light green
+        "Jun": "#FF6B6B", "Jul": "#FF6B6B", "Aug": "#FF6B6B",   # summer light red
+        "Sep": "#FFB266", "Oct": "#FFB266", "Nov": "#FFB266",   # autumn light orange
+    }
+    return [f"color: {season_color.get(v, 'inherit')}" for v in s]
+
 # -------- App --------
 df = load_data()
 prods = eligible_products(df)
@@ -194,15 +203,21 @@ with cols[2]:
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
-# Right panel: compact with combined variance score
+# Right panel: compact with combined score (rename column to 'score' and make table compact)
 with cols[3]:
     st.markdown("### Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
-    vr_small = (
-        vr[["product_gr", "variance_score"]]
-          .rename(columns={"product_gr": "product_gr", "variance_score": "variance score"})
+    vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score": "score"})
+    st.dataframe(
+        vr_small,
+        use_container_width=True,
+        height=360,
+        hide_index=True,
+        column_config={
+            "product_gr": st.column_config.TextColumn("product_gr", width="large"),
+            "score": st.column_config.NumberColumn("score", format="%.4f", width="small"),
+        },
     )
-    st.dataframe(vr_small, use_container_width=True, height=380, hide_index=True)
 
 # ---- Counts by season + monthly table + seasonal average price bar plot ----
 st.markdown("---")
@@ -237,7 +252,7 @@ with season_cols[0]:
                          .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
         st.dataframe(styled_season, use_container_width=True)
 
-        # Monthly table below
+        # Monthly table (no scrolling; month name colored by season)
         if dd.empty:
             st.info("No monthly data for selected years.")
         else:
@@ -246,12 +261,16 @@ with season_cols[0]:
             mon_tbl = dd.groupby("month_num").agg(
                 count=("price_mid", "size"),
                 price_mid_avg=("price_mid", "mean"),
-            ).reindex(range(1,13))
-            mon_tbl.index = [month_names[m] for m in mon_tbl.index]
+            ).reindex(range(1,13)).reset_index()
+            mon_tbl["month"] = mon_tbl["month_num"].map(month_names)
+            mon_tbl = mon_tbl[["month", "count", "price_mid_avg"]]
+
             styled_month = (mon_tbl.style
                             .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
+                            .apply(_month_text_colors, subset=["month"])
                             .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
-            st.dataframe(styled_month, use_container_width=True)
+            # height tuned to show all 12 months without vertical scroll
+            st.dataframe(styled_month, use_container_width=True, height=420, hide_index=True)
 
 # Right side: Seasonal average price bar plot with custom colors + outline
 with season_cols[1]:
