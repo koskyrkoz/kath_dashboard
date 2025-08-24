@@ -58,7 +58,7 @@ def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
     q75 = g.quantile(0.75)
     q25 = g.quantile(0.25)
     robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
-    w = (1 - np.exp(-n / 180.0)).rename("weight")  # saturates with more obs
+    w = (1 - np.exp(-n / 180.0)).rename("weight")
     score = (robust_std * w).rename("fluctuation_score")
     out = pd.concat([n, robust_std, w, score], axis=1).reset_index()
     return out.sort_values("fluctuation_score", ascending=False)
@@ -177,24 +177,26 @@ with body[1]:
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
+# ==== RIGHT PANEL: renamed + columns + hide index ====
 with body[2]:
-    st.subheader("Price fluctuations (ranked)")
+    st.subheader("Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
-    st.dataframe(vr.rename(columns={
-        "product_gr": "product",
-        "n_obs": "obs",
-        "robust_std": "robust_std",
-        "weight": "n_weight",
-        "fluctuation_score": "score"
-    }), use_container_width=True, height=500)
 
-# ---- Counts by season + box plot ----
+    # map product_gr -> representative product_en
+    map_en = (df.groupby("product_gr")["product_en"]
+                .agg(lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]))
+    vr = vr.merge(map_en.rename("product_en"), on="product_gr", how="left")
+
+    vr_small = (vr[["product_en", "n_obs", "fluctuation_score"]]
+                  .rename(columns={"n_obs": "obs", "fluctuation_score": "score"}))
+    st.dataframe(vr_small, use_container_width=True, height=500, hide_index=True)
+
+# ---- Counts by season + bar plot ----
 st.markdown("---")
 st.subheader("Counts by season")
 
 season_cols = st.columns([3, 5])
 with season_cols[0]:
-    # Year checkboxes for this section
     st.write("**Years (season section)**")
     ys1 = st.checkbox("2021", True, key="s2021")
     ys2 = st.checkbox("2022", True, key="s2022")
@@ -211,38 +213,45 @@ with season_cols[0]:
         price_mid_avg=("price_mid", "mean"),
     ).reindex(seasons).fillna(0)
 
-    # Conditional formatting relative to this product's seasonal values
     styled = (tbl.style
               .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
-              .background_gradient(axis=0, subset=["count"], cmap="Blues")
-              .background_gradient(axis=0, subset=["price_mid_avg"], cmap="Greens"))
+              # counts: green high → red low
+              .background_gradient(subset=["count"], cmap="RdYlGn")
+              # prices: green low → red high
+              .background_gradient(subset=["price_mid_avg"], cmap="RdYlGn_r"))
     st.dataframe(styled, use_container_width=True)
 
 with season_cols[1]:
     if dd.empty:
         st.info("No data for selected years.")
     else:
-        fig3, ax3 = plt.subplots(figsize=(9, 4.5))
+        fig3, ax_price = plt.subplots(figsize=(9, 4.5))
         order = ["Winter", "Spring", "Summer", "Autumn"]
         dd["season"] = pd.Categorical(dd["season"], categories=order, ordered=True)
 
-        # Boxplot of price_mid (green)
-        data_for_box = [dd.loc[dd["season"] == s, "price_mid"].dropna().values for s in order]
-        bp = ax3.boxplot(data_for_box, patch_artist=True, labels=order)
-        for box in bp["boxes"]:
-            box.set(facecolor="none", edgecolor="green")
-        for median in bp["medians"]:
-            median.set(color="green")
-        ax3.set_ylabel("€ / kg")
-        ax3.set_xlabel("season")
-
-        # Counts per season (blue) on twin axis
-        axc = ax3.twinx()
+        avg_price = dd.groupby("season")["price_mid"].mean().reindex(order).fillna(0)
         counts = dd["season"].value_counts().reindex(order).fillna(0).astype(int)
-        axc.bar(range(1, 5), counts.values, alpha=0.25, width=0.6, color="blue")
-        axc.set_ylabel("count (occurrences)")
-        ax3.set_title(f"Seasonal distribution — {product}")
 
+        idx = np.arange(len(order))
+        width = 0.4
+
+        # Blue = price (left y-axis)
+        ax_price.bar(idx - width/2, avg_price.values, width=width, color="blue", label="avg price (€ / kg)")
+        ax_price.set_ylabel("€ / kg")
+        ax_price.set_xlabel("season")
+        ax_price.set_xticks(idx)
+        ax_price.set_xticklabels(order, rotation=0)
+
+        # Green = occurrences (right y-axis)
+        ax_cnt = ax_price.twinx()
+        ax_cnt.bar(idx + width/2, counts.values, width=width, color="green", label="occurrences")
+        ax_cnt.set_ylabel("count")
+
+        h1, l1 = ax_price.get_legend_handles_labels()
+        h2, l2 = ax_cnt.get_legend_handles_labels()
+        ax_price.legend(h1 + h2, l1 + l2, loc="upper right")
+
+        ax_price.set_title(f"Seasonal bars — {product}")
         st.pyplot(fig3, clear_figure=True)
 
 # Bottom summary
@@ -257,5 +266,3 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
-
-
