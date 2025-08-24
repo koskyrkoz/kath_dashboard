@@ -160,10 +160,10 @@ def _text_color_green_to_red(series: pd.Series):
 
 def _month_text_colors(s: pd.Series):
     season_color = {
-        "Jan": "#4EA3E6", "Feb": "#4EA3E6", "Dec": "#4EA3E6",   # winter light blue-ish
-        "Mar": "#66C97A", "Apr": "#66C97A", "May": "#66C97A",   # spring light green
-        "Jun": "#FF6B6B", "Jul": "#FF6B6B", "Aug": "#FF6B6B",   # summer light red
-        "Sep": "#FFB266", "Oct": "#FFB266", "Nov": "#FFB266",   # autumn light orange
+        "Jan": "#4EA3E6", "Feb": "#4EA3E6", "Dec": "#4EA3E6",   # winter
+        "Mar": "#66C97A", "Apr": "#66C97A", "May": "#66C97A",   # spring
+        "Jun": "#FF6B6B", "Jul": "#FF6B6B", "Aug": "#FF6B6B",   # summer
+        "Sep": "#FFB266", "Oct": "#FFB266", "Nov": "#FFB266",   # autumn
     }
     return [f"color: {season_color.get(v, 'inherit')}" for v in s]
 
@@ -176,8 +176,8 @@ if not prods:
 # Selector
 product = st.selectbox("product_gr", prods, index=0)
 
-# Main layout: [years checkboxes] | [avg price per year] | [clustered seasonal] | [right panel table]
-cols = st.columns([2, 7, 7, 3])
+# Make right panel a bit wider so no horizontal scroll is needed
+cols = st.columns([2, 7, 7, 4])
 
 # Left: years checkboxes
 with cols[0]:
@@ -203,19 +203,27 @@ with cols[2]:
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
-# Right panel: compact with combined score (rename column to 'score' and make table compact)
+# Right panel: compact "Variance score" with no horizontal scroll
 with cols[3]:
-    st.markdown("### Product Occurrences (obs) & Variance (score)")
+    st.markdown("### Variance score")
     vr = fluctuation_ranking(df)
     vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score": "score"})
+
+    # shorten long Greek names to avoid horizontal scroll
+    def _shorten(text, maxlen=26):
+        s = str(text)
+        return s if len(s) <= maxlen else s[:maxlen-1] + "…"
+    vr_small_display = vr_small.copy()
+    vr_small_display["product_gr"] = vr_small_display["product_gr"].map(lambda s: _shorten(s, 26))
+
     st.dataframe(
-        vr_small,
+        vr_small_display,
         use_container_width=True,
         height=360,
         hide_index=True,
         column_config={
-            "product_gr": st.column_config.TextColumn("product_gr", width="large"),
-            "score": st.column_config.NumberColumn("score", format="%.4f", width="small"),
+            "product_gr": st.column_config.TextColumn("product_gr", width=220),
+            "score": st.column_config.NumberColumn("score", format="%.4f", width=110),
         },
     )
 
@@ -252,7 +260,7 @@ with season_cols[0]:
                          .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
         st.dataframe(styled_season, use_container_width=True)
 
-        # Monthly table (no scrolling; month name colored by season)
+        # Monthly table (compact; month name colored by season)
         if dd.empty:
             st.info("No monthly data for selected years.")
         else:
@@ -269,7 +277,7 @@ with season_cols[0]:
                             .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
                             .apply(_month_text_colors, subset=["month"])
                             .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
-            # height tuned to show all 12 months without vertical scroll
+            # show all 12 months without horizontal/vertical scroll
             st.dataframe(styled_month, use_container_width=True, height=420, hide_index=True)
 
 # Right side: Seasonal average price bar plot with custom colors + outline
