@@ -3,6 +3,7 @@ selenium
 numpy
 pandas
 matplotlib
+scikit-learn
 duckdb
 pyarrow
 openpyxl
@@ -11,4 +12,5 @@ python-dotenv
 tqdm
 # optional:
 # webdriver-manager
+
 
