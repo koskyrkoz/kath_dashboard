@@ -52,13 +52,13 @@ def eligible_products(d: pd.DataFrame) -> list:
     return sorted(cnt[cnt >= MIN_OBS].index.tolist())
 
 @st.cache_data
-def fluctuation_ranking(d: pd.DataFrame]) -> pd.DataFrame:
+def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
     g = d.groupby("product_gr")["price_mid"]
     n = g.size().rename("n_obs")
     q75 = g.quantile(0.75)
     q25 = g.quantile(0.25)
     robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
-    w = (1 - np.exp(-n / 180.0)).rename("weight")  # saturates as n grows
+    w = (1 - np.exp(-n / 180.0)).rename("weight")  # saturates with more obs
     score = (robust_std * w).rename("fluctuation_score")
     out = pd.concat([n, robust_std, w, score], axis=1).reset_index()
     return out.sort_values("fluctuation_score", ascending=False)
@@ -257,4 +257,5 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
 
