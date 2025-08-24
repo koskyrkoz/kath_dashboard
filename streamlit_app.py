@@ -55,13 +55,15 @@ def eligible_products(d: pd.DataFrame) -> list:
 def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
     g = d.groupby("product_gr")["price_mid"]
     n = g.size().rename("n_obs")
-    q75 = g.quantile(0.75)
-    q25 = g.quantile(0.25)
+    q75, q25 = g.quantile(0.75), g.quantile(0.25)
     robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
-    w = (1 - np.exp(-n / 180.0)).rename("weight")  # length-adjusted weight
-    score = (robust_std * w).rename("fluctuation_score")
-    out = pd.concat([n, robust_std, w, score], axis=1).reset_index()
-    return out.sort_values("fluctuation_score", ascending=False)
+    weight = (1 - np.exp(-n / 180.0)).rename("weight")
+    base_score = (robust_std * weight).rename("fluctuation_score")
+    n_max = max(float(n.max()), 1.0)
+    obs_boost = (np.log1p(n) / np.log1p(n_max)).rename("obs_boost")
+    variance_score = (base_score * obs_boost).rename("variance_score")
+    out = pd.concat([n, robust_std, weight, base_score, obs_boost, variance_score], axis=1).reset_index()
+    return out.sort_values("variance_score", ascending=False)
 
 def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_on: set):
     dsel = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
@@ -80,7 +82,7 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     y_future = model.predict(X_future) if len(future_2025) else np.array([])
 
     for y in YEARS:
-        if y not in years_on: 
+        if y not in years_on:
             continue
         seg = dsel[dsel["obs_date"].dt.year == y].sort_values("obs_date")
         if not seg.empty:
@@ -162,7 +164,7 @@ prods = eligible_products(df)
 if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
-# Top selector
+# Selector
 product = st.selectbox("product_gr", prods, index=0)
 
 # Main layout: [years checkboxes] | [avg price per year] | [clustered seasonal] | [right panel table]
@@ -192,23 +194,23 @@ with cols[2]:
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
-# Right panel: compact table with Greek names
+# Right panel: compact with combined variance score
 with cols[3]:
     st.markdown("### Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
     vr_small = (
-        vr[["product_gr", "n_obs", "fluctuation_score"]]
-          .rename(columns={"product_gr": "product_gr", "n_obs": "obs", "fluctuation_score": "score"})
+        vr[["product_gr", "variance_score"]]
+          .rename(columns={"product_gr": "product_gr", "variance_score": "variance score"})
     )
     st.dataframe(vr_small, use_container_width=True, height=380, hide_index=True)
 
-# ---- Counts by season + seasonal average price bar plot ----
+# ---- Counts by season + monthly table + seasonal average price bar plot ----
 st.markdown("---")
 st.subheader("Counts by season")
 
 season_cols = st.columns([5, 7])
 
-# Left side: Years controls (left) and table (right)
+# Left side: Years controls (left) and tables (right)
 with season_cols[0]:
     left_controls, table_col = st.columns([1, 4])
     with left_controls:
@@ -223,15 +225,33 @@ with season_cols[0]:
     with table_col:
         dd = df[(df["product_gr"] == product) & (df["obs_date"].dt.year.isin(list(years_on_season)))]
         dd = add_season_column(dd)
+
         seasons = ["Winter", "Spring", "Summer", "Autumn"]
         tbl = dd.groupby("season").agg(
             count=("price_mid", "size"),
             price_mid_avg=("price_mid", "mean"),
         ).reindex(seasons).fillna(0)
-        styled = (tbl.style
-                  .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
-                  .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
-        st.dataframe(styled, use_container_width=True)
+
+        styled_season = (tbl.style
+                         .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
+                         .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
+        st.dataframe(styled_season, use_container_width=True)
+
+        # Monthly table below
+        if dd.empty:
+            st.info("No monthly data for selected years.")
+        else:
+            dd["month_num"] = dd["obs_date"].dt.month
+            month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+            mon_tbl = dd.groupby("month_num").agg(
+                count=("price_mid", "size"),
+                price_mid_avg=("price_mid", "mean"),
+            ).reindex(range(1,13))
+            mon_tbl.index = [month_names[m] for m in mon_tbl.index]
+            styled_month = (mon_tbl.style
+                            .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
+                            .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
+            st.dataframe(styled_month, use_container_width=True)
 
 # Right side: Seasonal average price bar plot with custom colors + outline
 with season_cols[1]:
@@ -254,7 +274,7 @@ with season_cols[1]:
         colors = [colors_map[s] for s in order]
         idx = np.arange(len(order))
 
-        bars = ax_price.bar(idx, avg_price.values, color=colors, edgecolor="black", linewidth=1.0)
+        ax_price.bar(idx, avg_price.values, color=colors, edgecolor="black", linewidth=1.0)
         ax_price.set_ylabel("€ / kg")
         ax_price.set_xlabel("season")
         ax_price.set_xticks(idx)
