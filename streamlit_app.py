@@ -242,18 +242,6 @@ with season_cols[1]:
         ax_price.set_xticks(idx)
         ax_price.set_xticklabels(order, rotation=0)
 
-        # Green = occurrences (right y-axis)
-        ax_cnt = ax_price.twinx()
-        ax_cnt.bar(idx + width/2, counts.values, width=width, color="green", label="occurrences")
-        ax_cnt.set_ylabel("count")
-
-        h1, l1 = ax_price.get_legend_handles_labels()
-        h2, l2 = ax_cnt.get_legend_handles_labels()
-        ax_price.legend(h1 + h2, l1 + l2, loc="upper right")
-
-        ax_price.set_title(f"Seasonal bars — {product}")
-        st.pyplot(fig3, clear_figure=True)
-
 # Bottom summary
 dd_all = df[df["product_gr"] == product]
 years_present = sorted(dd_all["obs_date"].dt.year.unique().tolist())
@@ -266,4 +254,5 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
 
