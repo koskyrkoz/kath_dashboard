@@ -1,6 +1,8 @@
 streamlit
 selenium
+numpy
 pandas
+matplotlib
 duckdb
 pyarrow
 openpyxl
@@ -9,3 +11,4 @@ python-dotenv
 tqdm
 # optional:
 # webdriver-manager
+
