@@ -182,12 +182,12 @@ with body[2]:
     st.subheader("Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
 
-    # map product_gr -> representative product_en
-    map_en = (df.groupby("product_gr")["product_en"]
+    # map product_gr -> representative product_gr
+    map_en = (df.groupby("product_gr")["product_gr"]
                 .agg(lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]))
-    vr = vr.merge(map_en.rename("product_en"), on="product_gr", how="left")
+    vr = vr.merge(map_en.rename("product_gr"), on="product_gr", how="left")
 
-    vr_small = (vr[["product_en", "n_obs", "fluctuation_score"]]
+    vr_small = (vr[["product_gr", "n_obs", "fluctuation_score"]]
                   .rename(columns={"n_obs": "obs", "fluctuation_score": "score"}))
     st.dataframe(vr_small, use_container_width=True, height=500, hide_index=True)
 
@@ -266,3 +266,4 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
