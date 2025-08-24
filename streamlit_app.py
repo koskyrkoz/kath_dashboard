@@ -52,10 +52,16 @@ def eligible_products(d: pd.DataFrame) -> list:
     return sorted(cnt[cnt >= MIN_OBS].index.tolist())
 
 @st.cache_data
-def variance_ranking(d: pd.DataFrame) -> pd.DataFrame:
-    col = "price_avg" if "price_avg" in d.columns and d["price_avg"].notna().any() else "price_mid"
-    v = d.groupby("product_gr")[col].var(ddof=1).rename("price_variance").fillna(0.0)
-    return v.reset_index()
+def fluctuation_ranking(d: pd.DataFrame]) -> pd.DataFrame:
+    g = d.groupby("product_gr")["price_mid"]
+    n = g.size().rename("n_obs")
+    q75 = g.quantile(0.75)
+    q25 = g.quantile(0.25)
+    robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
+    w = (1 - np.exp(-n / 180.0)).rename("weight")  # saturates as n grows
+    score = (robust_std * w).rename("fluctuation_score")
+    out = pd.concat([n, robust_std, w, score], axis=1).reset_index()
+    return out.sort_values("fluctuation_score", ascending=False)
 
 def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_on: set):
     dsel = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
@@ -120,32 +126,44 @@ def plot_clustered_seasonal(ax, dd: pd.DataFrame, product_gr: str):
     ax.set_title(f"Clustered seasonal profile – {product_gr}")
     ax.legend()
 
+def add_season_column(df_in: pd.DataFrame) -> pd.DataFrame:
+    m = df_in["obs_date"].dt.month
+    season = pd.Series(np.select(
+        [
+            m.isin([12,1,2]),
+            m.isin([3,4,5]),
+            m.isin([6,7,8]),
+            m.isin([9,10,11])
+        ],
+        ["Winter", "Spring", "Summer", "Autumn"],
+        default="Unknown"
+    ), index=df_in.index, name="season")
+    out = df_in.copy()
+    out["season"] = season
+    return out
+
 # -------- App --------
 df = load_data()
 prods = eligible_products(df)
 if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
-top_controls = st.columns([2, 1, 1])
+top_controls = st.columns([3, 1, 3])
 with top_controls[0]:
     product = st.selectbox("product_gr", prods, index=0)
-with top_controls[1]:
-    st.write("**Years**")
-with top_controls[2]:
-    sort_order = st.radio("Sort by variance", ["desc", "asc"], index=0, horizontal=True)
 
-body = st.columns([5, 4, 3])  # left plot (with nested year toggles), right plot, right-side segment
+# Main row: left (year lines + checkboxes), middle (clustered), right (variance list)
+body = st.columns([5, 4, 3])
 
-# Left: plot + vertical checkboxes
 left_plot_col, year_toggle_col = body[0].columns([6, 1])
 years_on = set()
 with year_toggle_col:
-    st.write("**Show**")
+    st.write("**Years**")
     y2021 = st.checkbox("2021", True)
     y2022 = st.checkbox("2022", True)
     y2023 = st.checkbox("2023", True)
     y2024 = st.checkbox("2024", True)
-    y2025 = st.checkbox("2025", True)  # includes forecast
+    y2025 = st.checkbox("2025", True)
     for y, flag in zip([2021, 2022, 2023, 2024, 2025], [y2021, y2022, y2023, y2024, y2025]):
         if flag: years_on.add(y)
 
@@ -154,29 +172,89 @@ with left_plot_col:
     plot_overlapped_with_forecast(ax1, df, product, years_on)
     st.pyplot(fig1, clear_figure=True)
 
-# Right: clustered profile
 with body[1]:
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
-# Right-side segment: variance-ranked products
 with body[2]:
-    st.subheader("Price variance (by product)")
-    vr = variance_ranking(df)
-    vr = vr.sort_values("price_variance", ascending=(sort_order == "asc")).reset_index(drop=True)
-    st.dataframe(vr.rename(columns={"product_gr":"product", "price_variance":"variance"}), use_container_width=True, height=500)
+    st.subheader("Price fluctuations (ranked)")
+    vr = fluctuation_ranking(df)
+    st.dataframe(vr.rename(columns={
+        "product_gr": "product",
+        "n_obs": "obs",
+        "robust_std": "robust_std",
+        "weight": "n_weight",
+        "fluctuation_score": "score"
+    }), use_container_width=True, height=500)
+
+# ---- Counts by season + box plot ----
+st.markdown("---")
+st.subheader("Counts by season")
+
+season_cols = st.columns([3, 5])
+with season_cols[0]:
+    # Year checkboxes for this section
+    st.write("**Years (season section)**")
+    ys1 = st.checkbox("2021", True, key="s2021")
+    ys2 = st.checkbox("2022", True, key="s2022")
+    ys3 = st.checkbox("2023", True, key="s2023")
+    ys4 = st.checkbox("2024", True, key="s2024")
+    ys5 = st.checkbox("2025", True, key="s2025")
+    years_on_season = {y for y, f in zip(YEARS, [ys1, ys2, ys3, ys4, ys5]) if f}
+
+    dd = df[(df["product_gr"] == product) & (df["obs_date"].dt.year.isin(list(years_on_season)))]
+    dd = add_season_column(dd)
+    seasons = ["Winter", "Spring", "Summer", "Autumn"]
+    tbl = dd.groupby("season").agg(
+        count=("price_mid", "size"),
+        price_mid_avg=("price_mid", "mean"),
+    ).reindex(seasons).fillna(0)
+
+    # Conditional formatting relative to this product's seasonal values
+    styled = (tbl.style
+              .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
+              .background_gradient(axis=0, subset=["count"], cmap="Blues")
+              .background_gradient(axis=0, subset=["price_mid_avg"], cmap="Greens"))
+    st.dataframe(styled, use_container_width=True)
+
+with season_cols[1]:
+    if dd.empty:
+        st.info("No data for selected years.")
+    else:
+        fig3, ax3 = plt.subplots(figsize=(9, 4.5))
+        order = ["Winter", "Spring", "Summer", "Autumn"]
+        dd["season"] = pd.Categorical(dd["season"], categories=order, ordered=True)
+
+        # Boxplot of price_mid (green)
+        data_for_box = [dd.loc[dd["season"] == s, "price_mid"].dropna().values for s in order]
+        bp = ax3.boxplot(data_for_box, patch_artist=True, labels=order)
+        for box in bp["boxes"]:
+            box.set(facecolor="none", edgecolor="green")
+        for median in bp["medians"]:
+            median.set(color="green")
+        ax3.set_ylabel("€ / kg")
+        ax3.set_xlabel("season")
+
+        # Counts per season (blue) on twin axis
+        axc = ax3.twinx()
+        counts = dd["season"].value_counts().reindex(order).fillna(0).astype(int)
+        axc.bar(range(1, 5), counts.values, alpha=0.25, width=0.6, color="blue")
+        axc.set_ylabel("count (occurrences)")
+        ax3.set_title(f"Seasonal distribution — {product}")
+
+        st.pyplot(fig3, clear_figure=True)
 
 # Bottom summary
-dd = df[df["product_gr"] == product]
-years_present = sorted(dd["obs_date"].dt.year.unique().tolist())
-counts_by_year = dd["obs_date"].dt.year.value_counts().sort_index()
+dd_all = df[df["product_gr"] == product]
+years_present = sorted(dd_all["obs_date"].dt.year.unique().tolist())
+counts_by_year = dd_all["obs_date"].dt.year.value_counts().sort_index()
 st.markdown("---")
 st.subheader("Data availability")
 c1, c2, c3 = st.columns(3)
-c1.metric("Observations", f"{len(dd):,}")
+c1.metric("Observations", f"{len(dd_all):,}")
 c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_present else "—")
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
-st.caption(f"Date range: {dd['obs_date'].min().date() if not dd.empty else '—'} → {dd['obs_date'].max().date() if not dd.empty else '—'}")
+st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
 
