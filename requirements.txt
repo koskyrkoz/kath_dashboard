@@ -1,0 +1,11 @@
+streamlit
+selenium
+pandas
+duckdb
+pyarrow
+openpyxl
+xlrd
+python-dotenv
+tqdm
+# optional:
+# webdriver-manager
