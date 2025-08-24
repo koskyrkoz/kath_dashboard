@@ -162,18 +162,16 @@ prods = eligible_products(df)
 if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
-# Bigger plots, more compact right panel
-body = st.columns([7, 7, 3])
+# Top selector
+product = st.selectbox("product_gr", prods, index=0)
 
-# Selector
-with body[0]:
-    product = st.selectbox("product_gr", prods, index=0)
+# Main layout: [years checkboxes] | [avg price per year] | [clustered seasonal] | [right panel table]
+cols = st.columns([2, 7, 7, 3])
 
-# Left big plot with vertical year checkboxes next to it
-left_plot_col, year_toggle_col = body[0].columns([6, 1])
-years_on = set()
-with year_toggle_col:
-    st.write("**Years**")
+# Left: years checkboxes
+with cols[0]:
+    st.markdown("**Years**")
+    years_on = set()
     y2021 = st.checkbox("2021", True)
     y2022 = st.checkbox("2022", True)
     y2023 = st.checkbox("2023", True)
@@ -182,19 +180,20 @@ with year_toggle_col:
     for y, flag in zip([2021, 2022, 2023, 2024, 2025], [y2021, y2022, y2023, y2024, y2025]):
         if flag: years_on.add(y)
 
-with left_plot_col:
-    fig1, ax1 = plt.subplots(figsize=(10, 5.5))
+# Middle-left: overlapped plot
+with cols[1]:
+    fig1, ax1 = plt.subplots(figsize=(10.5, 5.8))
     plot_overlapped_with_forecast(ax1, df, product, years_on)
     st.pyplot(fig1, clear_figure=True)
 
-# Middle big plot
-with body[1]:
-    fig2, ax2 = plt.subplots(figsize=(10, 5.5))
+# Middle-right: clustered plot
+with cols[2]:
+    fig2, ax2 = plt.subplots(figsize=(10.5, 5.8))
     plot_clustered_seasonal(ax2, df, product)
     st.pyplot(fig2, clear_figure=True)
 
-# Compact right panel: Greek names + smaller title + no index
-with body[2]:
+# Right panel: compact table with Greek names
+with cols[3]:
     st.markdown("### Product Occurrences (obs) & Variance (score)")
     vr = fluctuation_ranking(df)
     vr_small = (
@@ -203,16 +202,17 @@ with body[2]:
     )
     st.dataframe(vr_small, use_container_width=True, height=380, hide_index=True)
 
-# ---- Counts by season + single (price) bar plot ----
+# ---- Counts by season + seasonal average price bar plot ----
 st.markdown("---")
 st.subheader("Counts by season")
 
-# Table area with YEARS controls to the LEFT of the table
 season_cols = st.columns([5, 7])
+
+# Left side: Years controls (left) and table (right)
 with season_cols[0]:
     left_controls, table_col = st.columns([1, 4])
     with left_controls:
-        st.write("**Years:**")
+        st.markdown("**Years:**")
         ys1 = st.checkbox("2021", True, key="s2021")
         ys2 = st.checkbox("2022", True, key="s2022")
         ys3 = st.checkbox("2023", True, key="s2023")
@@ -228,34 +228,38 @@ with season_cols[0]:
             count=("price_mid", "size"),
             price_mid_avg=("price_mid", "mean"),
         ).reindex(seasons).fillna(0)
-
         styled = (tbl.style
                   .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
-                  # remove formatting on 'count'; color TEXT on price: green (low) → red (high)
                   .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
         st.dataframe(styled, use_container_width=True)
 
-# Right of table: price-only bar plot (no occurrences bar)
+# Right side: Seasonal average price bar plot with custom colors + outline
 with season_cols[1]:
     dd_plot = dd.copy()
     if dd_plot.empty:
         st.info("No data for selected years.")
     else:
-        fig3, ax_price = plt.subplots(figsize=(10, 4.8))
+        fig3, ax_price = plt.subplots(figsize=(10.5, 4.8))
         order = ["Winter", "Spring", "Summer", "Autumn"]
         dd_plot["season"] = pd.Categorical(dd_plot["season"], categories=order, ordered=True)
 
         avg_price = dd_plot.groupby("season")["price_mid"].mean().reindex(order).fillna(0)
-        idx = np.arange(len(order))
-        width = 0.6
 
-        ax_price.bar(idx, avg_price.values, width=width, color="blue", label="avg price (€ / kg)")
+        colors_map = {
+            "Winter": "#ADD8E6",   # light blue
+            "Spring": "#90EE90",   # light green
+            "Summer": "#FF7F7F",   # light red
+            "Autumn": "#FFD580",   # light orange
+        }
+        colors = [colors_map[s] for s in order]
+        idx = np.arange(len(order))
+
+        bars = ax_price.bar(idx, avg_price.values, color=colors, edgecolor="black", linewidth=1.0)
         ax_price.set_ylabel("€ / kg")
         ax_price.set_xlabel("season")
         ax_price.set_xticks(idx)
         ax_price.set_xticklabels(order, rotation=0)
         ax_price.set_title(f"Seasonal average price — {product}")
-        ax_price.legend(loc="upper right")
 
         st.pyplot(fig3, clear_figure=True)
 
