@@ -14,8 +14,8 @@ st.set_page_config(page_title="Fruit & Veg Prices", layout="wide")
 
 MIN_OBS = 180
 YEARS = [2021, 2022, 2023, 2024, 2025]
-file_path = r"C:\Users\kosti\Documents\fruitveg-prices\data\data_processed\daily_prices.csv"
-
+# file_path = r"C:\Users\kosti\Documents\fruitveg-prices\data\data_processed\daily_prices.csv"
+file_path = "daily_prices.csv"
 
 @st.cache_data
 def load_data():
@@ -160,3 +160,4 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd['obs_date'].min().date() if not dd.empty else '—'} → {dd['obs_date'].max().date() if not dd.empty else '—'}")
+
