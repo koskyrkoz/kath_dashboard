@@ -300,34 +300,44 @@ with top_cols[1]:
                            product_name_color="red", key_prefix="rise", eligible=prods)
 
 with top_cols[2]:
+    with top_cols[2]:
     st.markdown("### Variance score")
     vr = fluctuation_ranking(df)
-    vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score":"score"}).head(12)
-    # header
-    h1, h2 = st.columns([2.9, 0.5])
-    h1.markdown("**product**"); h2.markdown("**score**")
+    vr_small = (vr[["product_gr", "variance_score"]]
+                .rename(columns={"variance_score": "score"})
+                .head(12))
+
+    # add tiny link that sets ?prod=<product>
+    from urllib.parse import quote as _urlq
+    vr_small["↪"] = vr_small["product_gr"].apply(lambda p: f"?prod={_urlq(str(p))}")
+
+    # color the score text (low=red, high=green)
     smin, smax = float(vr_small["score"].min()), float(vr_small["score"].max())
-    for i, row in vr_small.iterrows():
-        prod = str(row["product_gr"]); score = float(row["score"])
-        cols = st.columns([2.9, 0.5])
-        # left cell: product + score (score colored, inline)
-        score_color = "inherit" if smax == smin else f"rgb({int(220*(1-(score-smin)/(smax-smin)))},{int(153*((score-smin)/(smax-smin)))},0)"
-        cols[0].markdown(f"<span style='font-weight:600'>{prod}</span><br>"
-                         f"<span style='color:{score_color}'>{score:.4f}</span>",
-                         unsafe_allow_html=True)
-        # right cell: compact arrow button (tighter layout)
-        with cols[1]:
-            _row_button_select(prod, f"var_{i}_{prod}", prods)
+    def _score_color(series: pd.Series):
+        if smax == smin:
+            return ["color: inherit"] * len(series)
+        styles = []
+        for v in series:
+            t = (float(v) - smin) / (smax - smin)
+            r, g = int(220 * (1 - t)), int(153 * t)
+            styles.append(f"color: rgb({r},{g},0)")
+        return styles
 
-st.caption(f"Comparing {mode.lower()} averages: current {cur_range[0]} → {cur_range[1]} vs previous {prev_range[0]} → {prev_range[1]}")
+    styled_vs = (vr_small.style
+                 .format({"score": "{:.4f}"})
+                 .apply(_score_color, subset=["score"]))
 
-# -------- product selector (drives plots)
-if "product_select" not in st.session_state or st.session_state["product_select"] not in prods:
-    st.session_state["product_select"] = prods[0]
-product = st.selectbox("product_gr", prods,
-                       index=prods.index(st.session_state["product_select"]),
-                       key="product_select")
-
+    st.dataframe(
+        styled_vs,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "product_gr": st.column_config.TextColumn("product", width="medium"),
+            "score": st.column_config.NumberColumn("score", format="%.4f", width="small"),
+            "↪": st.column_config.LinkColumn(" ", display_text="↪", width="small"),
+        },
+        height=300,
+    )
 # -------- Main plots row: [years] | [overlapped+forecast] | [clustered seasonal]
 cols = st.columns([2, 7, 7])
 with cols[0]:
@@ -430,3 +440,4 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
