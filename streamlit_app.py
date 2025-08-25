@@ -51,31 +51,35 @@ def eligible_products(d: pd.DataFrame) -> list:
     cnt = d[d["obs_date"].dt.year.isin(YEARS)].groupby("product_gr")["price_mid"].size()
     return sorted(cnt[cnt >= MIN_OBS].index.tolist())
 
-# Improved variance score: penalize step-like series with few distinct changes
 @st.cache_data
 def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
+    # Base fluctuation components
     g = d.groupby("product_gr")["price_mid"]
     n = g.size().rename("n_obs")
     q75, q25 = g.quantile(0.75), g.quantile(0.25)
     robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
     weight = (1 - np.exp(-n / 180.0)).rename("weight")
+    base_score = (robust_std * weight).rename("fluctuation_score")
 
+    # Penalize series with few DISTINCT price LEVEL CHANGES (step-like pricing)
     def change_ratio(series: pd.Series) -> float:
         x = series.dropna().values
-        if len(x) <= 1: return 0.0
+        if len(x) <= 1:
+            return 0.0
         med = float(np.nanmedian(x)) if len(x) else 0.0
-        tol = max(0.01, 0.01 * med)  # ~1% step tolerance
+        tol = max(0.01, 0.01 * med)  # 1% of median or 0.01 abs
         diffs = np.abs(np.diff(x))
         changes = int((diffs > tol).sum())
         return changes / max(len(x) - 1, 1)
 
     df_sorted = d.sort_values(["product_gr", "obs_date"])
     churn = df_sorted.groupby("product_gr")["price_mid"].apply(change_ratio).rename("change_ratio")
-    churn_weight = (churn.clip(0, 1) ** 0.7).rename("churn_weight")
+    churn_weight = (churn.clip(0, 1) ** 0.7).rename("churn_weight")  # concave: modest changes still matter
 
-    base_score = (robust_std * weight).rename("fluctuation_score")
+    # Favor more observations (diminishing returns)
     n_max = max(float(n.max()), 1.0)
     obs_boost = (np.log1p(n) / np.log1p(n_max)).rename("obs_boost")
+
     variance_score = (base_score * obs_boost * churn_weight).rename("variance_score")
 
     out = pd.concat([n, robust_std, weight, base_score, obs_boost, churn, churn_weight, variance_score], axis=1).reset_index()
@@ -98,7 +102,7 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     y_future = model.predict(X_future) if len(future_2025) else np.array([])
 
     for y in YEARS:
-        if y not in years_on:
+        if y not in years_on: 
             continue
         seg = dsel[dsel["obs_date"].dt.year == y].sort_values("obs_date")
         if not seg.empty:
@@ -154,7 +158,42 @@ def add_season_column(df_in: pd.DataFrame) -> pd.DataFrame:
     out["season"] = season
     return out
 
-# ----------------- Helpers for Top Movers UI -----------------
+def _text_color_green_to_red(series: pd.Series):
+    vmin, vmax = series.min(), series.max()
+    rng = (vmax - vmin) if pd.notna(vmax) and pd.notna(vmin) else 0.0
+    styles = []
+    for v in series:
+        if rng == 0 or pd.isna(v): styles.append("color: inherit")
+        else:
+            t = float((v - vmin) / rng)
+            r = int(220 * t); g = int(153 * (1 - t))
+            styles.append(f"color: rgb({r},{g},0)")
+    return styles
+
+def _text_color_red_to_green(series: pd.Series):
+    # low = red, high = green
+    vmin, vmax = series.min(), series.max()
+    rng = (vmax - vmin) if pd.notna(vmax) and pd.notna(vmin) else 0.0
+    styles = []
+    for v in series:
+        if rng == 0 or pd.isna(v):
+            styles.append("color: inherit")
+        else:
+            t = float((v - vmin) / rng)  # 0→low ... 1→high
+            r = int(220 * (1 - t))
+            g = int(153 * t)
+            styles.append(f"color: rgb({r},{g},0)")
+    return styles
+
+
+def _month_text_colors(s: pd.Series):
+    season_color = {"Jan":"#4EA3E6","Feb":"#4EA3E6","Dec":"#4EA3E6",
+                    "Mar":"#66C97A","Apr":"#66C97A","May":"#66C97A",
+                    "Jun":"#FF6B6B","Jul":"#FF6B6B","Aug":"#FF6B6B",
+                    "Sep":"#FFB266","Oct":"#FFB266","Nov":"#FFB266"}
+    return [f"color: {season_color.get(v, 'inherit')}" for v in s]
+
+# ---------- TOP SEGMENT: Top Movers + Variance score ----------
 def _period_bounds(last_date: pd.Timestamp, mode: str):
     if mode == "Week":
         p = last_date.to_period("W-MON")
@@ -189,64 +228,17 @@ def compute_top_movers(data: pd.DataFrame, mode: str):
 
     risers = (m[m["pct_change"] > 0].sort_values("pct_change", ascending=False).head(5).reset_index())
     risers = risers[["product_gr", "pct_change", "cur_avg"]]
+
     droppers = (m[m["pct_change"] < 0].sort_values("pct_change", ascending=True).head(5).reset_index())
     droppers["pct_change"] = -droppers["pct_change"]
     droppers = droppers[["product_gr", "pct_change", "cur_avg"]]
+
     return droppers, risers, (cur_start.date(), cur_end.date()), (prev_start.date(), prev_end.date())
 
-def _color_high_green_low_red(v, vmin, vmax):
-    if vmin == vmax or pd.isna(v): return "inherit"
-    t = float((v - vmin) / (vmax - vmin))  # 0→low, 1→high
-    r = int(220 * (1 - t)); g = int(153 * t)
-    return f"rgb({r},{g},0)"  # high=green, low=red
+def _green_text(col: pd.Series): return ['color: green'] * len(col)
+def _red_text(col: pd.Series):   return ['color: red'] * len(col)
 
-def _color_low_green_high_red(v, vmin, vmax):
-    if vmin == vmax or pd.isna(v): return "inherit"
-    t = float((v - vmin) / (vmax - vmin))  # 0→low, 1→high
-    r = int(220 * t); g = int(153 * (1 - t))
-    return f"rgb({r},{g},0)"  # low=green, high=red
-
-def _row_button_select(product: str, key: str, eligible: list):
-    btn = st.button("Select", key=key, use_container_width=True)
-    if btn:
-        if product in eligible:
-            st.session_state["product_select"] = product
-            st.rerun()
-        else:
-            st.warning(f"'{product}' doesn’t meet the minimum observation threshold.")
-
-def render_clickable_table(title: str, df_in: pd.DataFrame, percent_col: str, price_col: str,
-                           product_name_color: str, key_prefix: str, eligible: list):
-    st.markdown(f"**{title}**")
-    if df_in.empty:
-        st.info("No data for this period."); return
-
-    # Stats for conditional color mapping
-    pmin, pmax = float(df_in[percent_col].min()), float(df_in[percent_col].max())
-    amin, amax = float(df_in[price_col].min()), float(df_in[price_col].max())
-
-    # Header
-    c_prod, c_btn, c_pct, c_avg = st.columns([2.6, 1.2, 1.4, 1.4])
-    c_prod.markdown("**product**"); c_btn.markdown("** **")
-    c_pct.markdown(f"**{percent_col}**"); c_avg.markdown(f"**{price_col}**")
-
-    # Rows
-    for i, row in df_in.iterrows():
-        prod = str(row["product_gr"])
-        pct = float(row[percent_col])
-        avg = float(row[price_col])
-
-        pct_color = _color_high_green_low_red(pct, pmin, pmax)     # high % = green, low = red
-        avg_color = _color_low_green_high_red(avg, amin, amax)     # low price = green, high = red
-
-        col1, col2, col3, col4 = st.columns([2.6, 1.2, 1.4, 1.4])
-        col1.markdown(f"<span style='color:{product_name_color}; font-weight:600'>{prod}</span>", unsafe_allow_html=True)
-        with col2:
-            _row_button_select(prod, f"{key_prefix}_{i}_{prod}", eligible)
-        col3.markdown(f"<span style='color:{pct_color}'>{pct:.1f}%</span>", unsafe_allow_html=True)
-        col4.markdown(f"<span style='color:{avg_color}'>{avg:.3f}</span>", unsafe_allow_html=True)
-
-# ---------------------- App ----------------------
+# -------- App --------
 df = load_data()
 prods = eligible_products(df)
 if not prods:
@@ -257,51 +249,52 @@ st.markdown("## Top Movers")
 mode = st.radio("Period", ["Week", "Month"], horizontal=True)
 droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
 
-top_cols = st.columns([4, 4, 3.5])
-
+top_cols = st.columns([4, 4, 3])
 with top_cols[0]:
-    d_disp = droppers.rename(columns={"pct_change":"drop %","cur_avg":"avg price (€)"})
-    render_clickable_table(f"Biggest % drops ({mode.lower()})", d_disp[["product_gr","drop %","avg price (€)"]],
-                           percent_col="drop %", price_col="avg price (€)",
-                           product_name_color="green", key_prefix="drop", eligible=prods)
+    st.markdown(f"**Biggest % drops ({mode.lower()})**")
+    d_disp = droppers.rename(columns={"product_gr":"product_gr","pct_change":"drop %","cur_avg":"avg price (€)"})
+    d_disp = (d_disp.style
+              .format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(_green_text, subset=["product_gr"])
+              .apply(_text_color_red_to_green, subset=["drop %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
+
+    st.dataframe(d_disp, use_container_width=True, hide_index=True)
 
 with top_cols[1]:
-    r_disp = risers.rename(columns={"pct_change":"rise %","cur_avg":"avg price (€)"})
-    render_clickable_table(f"Biggest % rises ({mode.lower()})", r_disp[["product_gr","rise %","avg price (€)"]],
-                           percent_col="rise %", price_col="avg price (€)",
-                           product_name_color="red", key_prefix="rise", eligible=prods)
+    st.markdown(f"**Biggest % rises ({mode.lower()})**")
+    r_disp = risers.rename(columns={"product_gr":"product_gr","pct_change":"rise %","cur_avg":"avg price (€)"})
+    r_disp = (r_disp.style
+              .format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(_red_text, subset=["product_gr"])
+              .apply(_text_color_green_to_red, subset=["rise %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
+
+    st.dataframe(r_disp, use_container_width=True, hide_index=True)
 
 with top_cols[2]:
     st.markdown("### Variance score")
     vr = fluctuation_ranking(df)
     vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score":"score"})
-    # Show a compact clickable list (top 12)
-    header = st.columns([2.6, 1.2])
-    header[0].markdown("**product**"); header[1].markdown("**score**")
-    vs = vr_small.head(12).reset_index(drop=True)
-    smin, smax = float(vs["score"].min()), float(vs["score"].max())
-    for i, row in vs.iterrows():
-        prod = str(row["product_gr"]); score = float(row["score"])
-        cols = st.columns([2.6, 1.2])
-        cols[0].markdown(f"<span style='font-weight:600'>{prod}</span>", unsafe_allow_html=True)
-        with cols[1]:
-            st.markdown(f"<span style='color:{_color_high_green_low_red(score, smin, smax)}'>{score:.4f}</span>",
-                        unsafe_allow_html=True)
-        # Button row beneath name/score to keep width tight
-        bcols = st.columns([2.6, 1.2])
-        with bcols[0]:
-            pass
-        with bcols[1]:
-            _row_button_select(prod, f"var_{i}_{prod}", prods)
+    def _shorten(text, maxlen=26):
+        s = str(text);  return s if len(s) <= maxlen else s[:maxlen-1] + "…"
+    vr_small_display = vr_small.copy()
+    vr_small_display["product_gr"] = vr_small_display["product_gr"].map(lambda s: _shorten(s, 26))
+    st.dataframe(
+        vr_small_display,
+        use_container_width=True,
+        height=280,
+        hide_index=True,
+        column_config={
+            "product_gr": st.column_config.TextColumn("product_gr", width=200),
+            "score": st.column_config.NumberColumn("score", format="%.4f", width=100),
+        },
+    )
 
 st.caption(f"Comparing {mode.lower()} averages: current {cur_range[0]} → {cur_range[1]} vs previous {prev_range[0]} → {prev_range[1]}")
 
-# Selector (drives plots); buttons set st.session_state["product_select"]
-if "product_select" not in st.session_state or st.session_state["product_select"] not in prods:
-    st.session_state["product_select"] = prods[0]
-product = st.selectbox("product_gr", prods,
-                       index=prods.index(st.session_state["product_select"]),
-                       key="product_select")
+# Selector for rest of page
+product = st.selectbox("product_gr", prods, index=0)
 
 # Main layout: [years checkboxes] | [avg price per year] | [clustered seasonal]
 cols = st.columns([2, 7, 7])
@@ -314,7 +307,7 @@ with cols[0]:
     y2023 = st.checkbox("2023", True)
     y2024 = st.checkbox("2024", True)
     y2025 = st.checkbox("2025", True)
-    for y, flag in zip(YEARS, [y2021, y2022, y2023, y2024, y2025]):
+    for y, flag in zip([2021, 2022, 2023, 2024, 2025], [y2021, y2022, y2023, y2024, y2025]):
         if flag: years_on.add(y)
 
 with cols[1]:
@@ -349,20 +342,6 @@ with season_cols[0]:
 
         seasons = ["Winter", "Spring", "Summer", "Autumn"]
         tbl = dd.groupby("season").agg(count=("price_mid", "size"), price_mid_avg=("price_mid", "mean")).reindex(seasons).fillna(0)
-
-        # price text color: low=green, high=red
-        def _text_color_green_to_red(series: pd.Series):
-            vmin, vmax = series.min(), series.max()
-            rng = (vmax - vmin) if pd.notna(vmax) and pd.notna(vmin) else 0.0
-            styles = []
-            for v in series:
-                if rng == 0 or pd.isna(v): styles.append("color: inherit")
-                else:
-                    t = float((v - vmin) / rng)
-                    r = int(220 * t); g = int(153 * (1 - t))
-                    styles.append(f"color: rgb({r},{g},0)")
-            return styles
-
         styled_season = (tbl.style
                          .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
                          .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
@@ -376,14 +355,6 @@ with season_cols[0]:
             mon_tbl = dd.groupby("month_num").agg(count=("price_mid","size"), price_mid_avg=("price_mid","mean")).reindex(range(1,13)).reset_index()
             mon_tbl["month"] = mon_tbl["month_num"].map(month_names)
             mon_tbl = mon_tbl[["month","count","price_mid_avg"]]
-
-            def _month_text_colors(s: pd.Series):
-                season_color = {"Jan":"#ADD8E6","Feb":"#ADD8E6","Dec":"#ADD8E6",
-                                "Mar":"#90EE90","Apr":"#90EE90","May":"#90EE90",
-                                "Jun":"#FF7F7F","Jul":"#FF7F7F","Aug":"#FF7F7F",
-                                "Sep":"#FFD580","Oct":"#FFD580","Nov":"#FFD580"}
-                return [f"color: {season_color.get(v, 'inherit')}" for v in s]
-
             styled_month = (mon_tbl.style
                             .format({"price_mid_avg":"{:.3f}","count":"{:,.0f}"})
                             .apply(_month_text_colors, subset=["month"])
