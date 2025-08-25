@@ -69,7 +69,6 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     dsel = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
     if dsel.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
-
     X_train = _fourier_features(dsel["obs_date"])
     y_train = dsel["price_mid"].to_numpy()
     model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=1.0)).fit(X_train, y_train)
@@ -82,7 +81,7 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     y_future = model.predict(X_future) if len(future_2025) else np.array([])
 
     for y in YEARS:
-        if y not in years_on:
+        if y not in years_on: 
             continue
         seg = dsel[dsel["obs_date"].dt.year == y].sort_values("obs_date")
         if not seg.empty:
@@ -101,8 +100,8 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     ax.set_title(f"Average price per year – {product_gr}")
     ax.legend()
 
-def plot_clustered_seasonal(ax, dd: pd.DataFrame, product_gr: str):
-    x = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
+def plot_clustered_seasonal(ax, dd: pd.DataFrame, product_gr: str, years_on: set):
+    x = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(list(years_on)))].copy()
     if x.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
     x["year"] = x["obs_date"].dt.year
@@ -131,14 +130,8 @@ def plot_clustered_seasonal(ax, dd: pd.DataFrame, product_gr: str):
 def add_season_column(df_in: pd.DataFrame) -> pd.DataFrame:
     m = df_in["obs_date"].dt.month
     season = pd.Series(np.select(
-        [
-            m.isin([12,1,2]),
-            m.isin([3,4,5]),
-            m.isin([6,7,8]),
-            m.isin([9,10,11])
-        ],
-        ["Winter", "Spring", "Summer", "Autumn"],
-        default="Unknown"
+        [m.isin([12,1,2]), m.isin([3,4,5]), m.isin([6,7,8]), m.isin([9,10,11])],
+        ["Winter", "Spring", "Summer", "Autumn"], default="Unknown"
     ), index=df_in.index, name="season")
     out = df_in.copy()
     out["season"] = season
@@ -149,23 +142,71 @@ def _text_color_green_to_red(series: pd.Series):
     rng = (vmax - vmin) if pd.notna(vmax) and pd.notna(vmin) else 0.0
     styles = []
     for v in series:
-        if rng == 0 or pd.isna(v):
-            styles.append("color: inherit")
+        if rng == 0 or pd.isna(v): styles.append("color: inherit")
         else:
             t = float((v - vmin) / rng)
-            r = int(220 * t)
-            g = int(153 * (1 - t))
+            r = int(220 * t); g = int(153 * (1 - t))
             styles.append(f"color: rgb({r},{g},0)")
     return styles
 
 def _month_text_colors(s: pd.Series):
-    season_color = {
-        "Jan": "#4EA3E6", "Feb": "#4EA3E6", "Dec": "#4EA3E6",   # winter
-        "Mar": "#66C97A", "Apr": "#66C97A", "May": "#66C97A",   # spring
-        "Jun": "#FF6B6B", "Jul": "#FF6B6B", "Aug": "#FF6B6B",   # summer
-        "Sep": "#FFB266", "Oct": "#FFB266", "Nov": "#FFB266",   # autumn
-    }
+    season_color = {"Jan":"#4EA3E6","Feb":"#4EA3E6","Dec":"#4EA3E6",
+                    "Mar":"#66C97A","Apr":"#66C97A","May":"#66C97A",
+                    "Jun":"#FF6B6B","Jul":"#FF6B6B","Aug":"#FF6B6B",
+                    "Sep":"#FFB266","Oct":"#FFB266","Nov":"#FFB266"}
     return [f"color: {season_color.get(v, 'inherit')}" for v in s]
+
+# ---------- TOP SEGMENT: Top Movers + Variance score ----------
+def _period_bounds(last_date: pd.Timestamp, mode: str):
+    if mode == "Week":
+        p = last_date.to_period("W-MON")
+        return p.start_time.normalize(), p.end_time.normalize()
+    else:
+        p = last_date.to_period("M")
+        return p.start_time.normalize(), p.end_time.normalize()
+
+def _prev_period_bounds(start: pd.Timestamp, mode: str):
+    if mode == "Week":
+        prev_end = start - pd.Timedelta(days=1)
+        p = prev_end.to_period("W-MON")
+        return p.start_time.normalize(), p.end_time.normalize()
+    else:
+        prev_end = (start - pd.Timedelta(days=1))
+        p = prev_end.to_period("M")
+        return p.start_time.normalize(), p.end_time.normalize()
+
+def compute_top_movers(data: pd.DataFrame, mode: str):
+    last_date = data["obs_date"].max().normalize()
+    cur_start, cur_end = _period_bounds(last_date, mode)
+    prev_start, prev_end = _prev_period_bounds(cur_start, mode)
+
+    cur = (data[(data["obs_date"] >= cur_start) & (data["obs_date"] <= cur_end)]
+           .groupby("product_gr")["price_mid"].mean().rename("cur_avg"))
+    prev = (data[(data["obs_date"] >= prev_start) & (data["obs_date"] <= prev_end)]
+           .groupby("product_gr")["price_mid"].mean().rename("prev_avg"))
+
+    m = pd.concat([cur, prev], axis=1).dropna()
+    m = m[m["prev_avg"] > 0]
+    m["pct_change"] = (m["cur_avg"] - m["prev_avg"]) / m["prev_avg"] * 100.0
+
+    risers = (m[m["pct_change"] > 0]
+              .sort_values("pct_change", ascending=False)
+              .head(5)
+              .reset_index())
+    risers = risers[["product_gr", "pct_change", "cur_avg"]]
+
+    droppers = (m[m["pct_change"] < 0]
+                .sort_values("pct_change", ascending=True)
+                .head(5)
+                .reset_index())
+    # show magnitude as positive % for drops
+    droppers["pct_change"] = -droppers["pct_change"]
+    droppers = droppers[["product_gr", "pct_change", "cur_avg"]]
+
+    return droppers, risers, (cur_start.date(), cur_end.date()), (prev_start.date(), prev_end.date())
+
+def _green_text(col: pd.Series): return ['color: green'] * len(col)
+def _red_text(col: pd.Series):   return ['color: red'] * len(col)
 
 # -------- App --------
 df = load_data()
@@ -173,13 +214,51 @@ prods = eligible_products(df)
 if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
-# Selector
+# TOP segment
+st.markdown("## Top Movers")
+mode = st.radio("Period", ["Week", "Month"], horizontal=True)
+droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
+
+top_cols = st.columns([4, 4, 3])
+with top_cols[0]:
+    st.markdown(f"**Biggest % drops ({mode.lower()})**")
+    d_disp = droppers.rename(columns={"product_gr":"product_gr","pct_change":"drop %","cur_avg":"avg price (€)"})
+    d_disp = d_disp.style.format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"}).apply(_green_text, subset=["product_gr"])
+    st.dataframe(d_disp, use_container_width=True, hide_index=True)
+
+with top_cols[1]:
+    st.markdown(f"**Biggest % rises ({mode.lower()})**")
+    r_disp = risers.rename(columns={"product_gr":"product_gr","pct_change":"rise %","cur_avg":"avg price (€)"})
+    r_disp = r_disp.style.format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"}).apply(_red_text, subset=["product_gr"])
+    st.dataframe(r_disp, use_container_width=True, hide_index=True)
+
+with top_cols[2]:
+    st.markdown("### Variance score")
+    vr = fluctuation_ranking(df)
+    vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score":"score"})
+    def _shorten(text, maxlen=26):
+        s = str(text);  return s if len(s) <= maxlen else s[:maxlen-1] + "…"
+    vr_small_display = vr_small.copy()
+    vr_small_display["product_gr"] = vr_small_display["product_gr"].map(lambda s: _shorten(s, 26))
+    st.dataframe(
+        vr_small_display,
+        use_container_width=True,
+        height=280,
+        hide_index=True,
+        column_config={
+            "product_gr": st.column_config.TextColumn("product_gr", width=200),
+            "score": st.column_config.NumberColumn("score", format="%.4f", width=100),
+        },
+    )
+
+st.caption(f"Comparing {mode.lower()} averages: current {cur_range[0]} → {cur_range[1]} vs previous {prev_range[0]} → {prev_range[1]}")
+
+# Selector for rest of page
 product = st.selectbox("product_gr", prods, index=0)
 
-# Make right panel a bit wider so no horizontal scroll is needed
-cols = st.columns([2, 7, 7, 4])
+# Main layout: [years checkboxes] | [avg price per year] | [clustered seasonal]
+cols = st.columns([2, 7, 7])
 
-# Left: years checkboxes
 with cols[0]:
     st.markdown("**Years**")
     years_on = set()
@@ -191,49 +270,21 @@ with cols[0]:
     for y, flag in zip([2021, 2022, 2023, 2024, 2025], [y2021, y2022, y2023, y2024, y2025]):
         if flag: years_on.add(y)
 
-# Middle-left: overlapped plot
 with cols[1]:
     fig1, ax1 = plt.subplots(figsize=(10.5, 5.8))
     plot_overlapped_with_forecast(ax1, df, product, years_on)
     st.pyplot(fig1, clear_figure=True)
 
-# Middle-right: clustered plot
 with cols[2]:
     fig2, ax2 = plt.subplots(figsize=(10.5, 5.8))
-    plot_clustered_seasonal(ax2, df, product)
+    plot_clustered_seasonal(ax2, df, product, years_on)  # now respects year toggles
     st.pyplot(fig2, clear_figure=True)
-
-# Right panel: compact "Variance score" with no horizontal scroll
-with cols[3]:
-    st.markdown("### Variance score")
-    vr = fluctuation_ranking(df)
-    vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score": "score"})
-
-    # shorten long Greek names to avoid horizontal scroll
-    def _shorten(text, maxlen=26):
-        s = str(text)
-        return s if len(s) <= maxlen else s[:maxlen-1] + "…"
-    vr_small_display = vr_small.copy()
-    vr_small_display["product_gr"] = vr_small_display["product_gr"].map(lambda s: _shorten(s, 26))
-
-    st.dataframe(
-        vr_small_display,
-        use_container_width=True,
-        height=360,
-        hide_index=True,
-        column_config={
-            "product_gr": st.column_config.TextColumn("product_gr", width=220),
-            "score": st.column_config.NumberColumn("score", format="%.4f", width=110),
-        },
-    )
 
 # ---- Counts by season + monthly table + seasonal average price bar plot ----
 st.markdown("---")
 st.subheader("Counts by season")
-
 season_cols = st.columns([5, 7])
 
-# Left side: Years controls (left) and tables (right)
 with season_cols[0]:
     left_controls, table_col = st.columns([1, 4])
     with left_controls:
@@ -250,37 +301,26 @@ with season_cols[0]:
         dd = add_season_column(dd)
 
         seasons = ["Winter", "Spring", "Summer", "Autumn"]
-        tbl = dd.groupby("season").agg(
-            count=("price_mid", "size"),
-            price_mid_avg=("price_mid", "mean"),
-        ).reindex(seasons).fillna(0)
-
+        tbl = dd.groupby("season").agg(count=("price_mid", "size"), price_mid_avg=("price_mid", "mean")).reindex(seasons).fillna(0)
         styled_season = (tbl.style
                          .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
                          .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
         st.dataframe(styled_season, use_container_width=True)
 
-        # Monthly table (compact; month name colored by season)
         if dd.empty:
             st.info("No monthly data for selected years.")
         else:
             dd["month_num"] = dd["obs_date"].dt.month
             month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
-            mon_tbl = dd.groupby("month_num").agg(
-                count=("price_mid", "size"),
-                price_mid_avg=("price_mid", "mean"),
-            ).reindex(range(1,13)).reset_index()
+            mon_tbl = dd.groupby("month_num").agg(count=("price_mid","size"), price_mid_avg=("price_mid","mean")).reindex(range(1,13)).reset_index()
             mon_tbl["month"] = mon_tbl["month_num"].map(month_names)
-            mon_tbl = mon_tbl[["month", "count", "price_mid_avg"]]
-
+            mon_tbl = mon_tbl[["month","count","price_mid_avg"]]
             styled_month = (mon_tbl.style
-                            .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
+                            .format({"price_mid_avg":"{:.3f}","count":"{:,.0f}"})
                             .apply(_month_text_colors, subset=["month"])
                             .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
-            # show all 12 months without horizontal/vertical scroll
             st.dataframe(styled_month, use_container_width=True, height=420, hide_index=True)
 
-# Right side: Seasonal average price bar plot with custom colors + outline
 with season_cols[1]:
     dd_plot = dd.copy()
     if dd_plot.empty:
@@ -289,25 +329,14 @@ with season_cols[1]:
         fig3, ax_price = plt.subplots(figsize=(10.5, 4.8))
         order = ["Winter", "Spring", "Summer", "Autumn"]
         dd_plot["season"] = pd.Categorical(dd_plot["season"], categories=order, ordered=True)
-
         avg_price = dd_plot.groupby("season")["price_mid"].mean().reindex(order).fillna(0)
-
-        colors_map = {
-            "Winter": "#ADD8E6",   # light blue
-            "Spring": "#90EE90",   # light green
-            "Summer": "#FF7F7F",   # light red
-            "Autumn": "#FFD580",   # light orange
-        }
+        colors_map = {"Winter":"#ADD8E6","Spring":"#90EE90","Summer":"#FF7F7F","Autumn":"#FFD580"}
         colors = [colors_map[s] for s in order]
         idx = np.arange(len(order))
-
         ax_price.bar(idx, avg_price.values, color=colors, edgecolor="black", linewidth=1.0)
-        ax_price.set_ylabel("€ / kg")
-        ax_price.set_xlabel("season")
-        ax_price.set_xticks(idx)
-        ax_price.set_xticklabels(order, rotation=0)
+        ax_price.set_ylabel("€ / kg"); ax_price.set_xlabel("season")
+        ax_price.set_xticks(idx); ax_price.set_xticklabels(order, rotation=0)
         ax_price.set_title(f"Seasonal average price — {product}")
-
         st.pyplot(fig3, clear_figure=True)
 
 # Bottom summary
