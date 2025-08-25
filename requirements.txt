@@ -1,4 +1,5 @@
 streamlit
+streamlit-aggrid
 selenium
 numpy
 pandas
@@ -12,5 +13,6 @@ python-dotenv
 tqdm
 # optional:
 # webdriver-manager
+
 
 
