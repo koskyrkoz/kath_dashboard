@@ -10,13 +10,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
 from sklearn.cluster import KMeans
 
-# --- AgGrid (for double-click row select) ---
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
-    AGGRID_AVAILABLE = True
-except Exception:
-    AGGRID_AVAILABLE = False
-
 st.set_page_config(page_title="Fruit & Veg Prices", layout="wide")
 
 MIN_OBS = 180
@@ -58,7 +51,7 @@ def eligible_products(d: pd.DataFrame) -> list:
     cnt = d[d["obs_date"].dt.year.isin(YEARS)].groupby("product_gr")["price_mid"].size()
     return sorted(cnt[cnt >= MIN_OBS].index.tolist())
 
-# Improved variance score: penalize few distinct changes
+# Improved variance score: penalize step-like series with few distinct changes
 @st.cache_data
 def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
     g = d.groupby("product_gr")["price_mid"]
@@ -92,6 +85,7 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     dsel = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
     if dsel.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
+
     X_train = _fourier_features(dsel["obs_date"])
     y_train = dsel["price_mid"].to_numpy()
     model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=1.0)).fit(X_train, y_train)
@@ -104,7 +98,7 @@ def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_o
     y_future = model.predict(X_future) if len(future_2025) else np.array([])
 
     for y in YEARS:
-        if y not in years_on: 
+        if y not in years_on:
             continue
         seg = dsel[dsel["obs_date"].dt.year == y].sort_values("obs_date")
         if not seg.empty:
@@ -160,7 +154,7 @@ def add_season_column(df_in: pd.DataFrame) -> pd.DataFrame:
     out["season"] = season
     return out
 
-# ---------- Helpers for Top Movers ----------
+# ----------------- Helpers for Top Movers UI -----------------
 def _period_bounds(last_date: pd.Timestamp, mode: str):
     if mode == "Week":
         p = last_date.to_period("W-MON")
@@ -200,85 +194,59 @@ def compute_top_movers(data: pd.DataFrame, mode: str):
     droppers = droppers[["product_gr", "pct_change", "cur_avg"]]
     return droppers, risers, (cur_start.date(), cur_end.date()), (prev_start.date(), prev_end.date())
 
-# ---------- AgGrid builders (double-click select) ----------
-def aggrid_movers_table(df_in: pd.DataFrame, percent_col: str, price_col: str, product_color: str, eligible_list: list, height: int = 260):
-    # Conditional text color: % (low=red, high=green), price (low=green, high=red)
-    pct_min = float(df_in[percent_col].min()) if len(df_in) else 0.0
-    pct_max = float(df_in[percent_col].max()) if len(df_in) else 1.0
-    pr_min = float(df_in[price_col].min()) if len(df_in) else 0.0
-    pr_max = float(df_in[price_col].max()) if len(df_in) else 1.0
+def _color_high_green_low_red(v, vmin, vmax):
+    if vmin == vmax or pd.isna(v): return "inherit"
+    t = float((v - vmin) / (vmax - vmin))  # 0→low, 1→high
+    r = int(220 * (1 - t)); g = int(153 * t)
+    return f"rgb({r},{g},0)"  # high=green, low=red
 
-    gb = GridOptionsBuilder.from_dataframe(df_in)
-    gb.configure_selection("single", use_checkbox=False)
-    gb.configure_grid_options(onCellDoubleClicked=JsCode("function(e){ e.api.deselectAll(); e.node.setSelected(true); }"))
+def _color_low_green_high_red(v, vmin, vmax):
+    if vmin == vmax or pd.isna(v): return "inherit"
+    t = float((v - vmin) / (vmax - vmin))  # 0→low, 1→high
+    r = int(220 * t); g = int(153 * (1 - t))
+    return f"rgb({r},{g},0)"  # low=green, high=red
 
-    prod_style = JsCode(f"function(params){{return {{'color':'{product_color}','fontWeight':'600'}};}}")
-    pct_style = JsCode(f"""
-        function(params){{
-            var v=params.value, min={pct_min}, max={pct_max};
-            if (max==min || v==null) return {{}};
-            var t=(v-min)/(max-min);              // 0→low, 1→high
-            var r=Math.round(220*(1-t));          // low=red
-            var g=Math.round(153*(t));            // high=green
-            return {{'color':'rgb('+r+','+g+',0)'}};
-        }}
-    """)
-    price_style = JsCode(f"""
-        function(params){{
-            var v=params.value, min={pr_min}, max={pr_max};
-            if (max==min || v==null) return {{}};
-            var t=(v-min)/(max-min);              // low→0, high→1
-            var r=Math.round(220*(t));            // high=red
-            var g=Math.round(153*(1-t));          # low=green
-            return {{'color':'rgb('+r+','+g+',0)'}};
-        }}
-    """.replace("#","//"))  # comment style fix
-
-    gb.configure_column("product_gr", header_name="product_gr", cellStyle=prod_style, width=180)
-    gb.configure_column(percent_col, header_name=percent_col,
-                        type=["numericColumn"], width=110,
-                        valueFormatter=JsCode("function(p){return (p.value==null)?'':p.value.toFixed(1)+'%';}"),
-                        cellStyle=pct_style)
-    gb.configure_column(price_col, header_name=price_col,
-                        type=["numericColumn"], width=130,
-                        valueFormatter=JsCode("function(p){return (p.value==null)?'':p.value.toFixed(3);}"),
-                        cellStyle=price_style)
-
-    grid = AgGrid(df_in, gridOptions=gb.build(),
-                  update_mode=GridUpdateMode.SELECTION_CHANGED,
-                  allow_unsafe_jscode=True, theme="balham",
-                  height=height, fit_columns_on_grid_load=True)
-
-    sel = grid.get("selected_rows", [])
-    if sel:
-        selected_product = sel[0]["product_gr"]
-        if selected_product in eligible_list:
-            st.session_state["product_select"] = selected_product
+def _row_button_select(product: str, key: str, eligible: list):
+    btn = st.button("Select", key=key, use_container_width=True)
+    if btn:
+        if product in eligible:
+            st.session_state["product_select"] = product
             st.rerun()
         else:
-            st.info(f"Selected '{selected_product}' isn’t eligible for the plots (insufficient observations).")
+            st.warning(f"'{product}' doesn’t meet the minimum observation threshold.")
 
-def aggrid_variance_table(df_in: pd.DataFrame, eligible_list: list, height: int = 260):
-    gb = GridOptionsBuilder.from_dataframe(df_in)
-    gb.configure_selection("single", use_checkbox=False)
-    gb.configure_grid_options(onCellDoubleClicked=JsCode("function(e){ e.api.deselectAll(); e.node.setSelected(true); }"))
-    gb.configure_column("product_gr", header_name="product_gr", width=200)
-    gb.configure_column("score", type=["numericColumn"], width=110,
-                        valueFormatter=JsCode("function(p){return (p.value==null)?'':p.value.toFixed(4);}"))
-    grid = AgGrid(df_in, gridOptions=gb.build(),
-                  update_mode=GridUpdateMode.SELECTION_CHANGED,
-                  allow_unsafe_jscode=True, theme="balham",
-                  height=height, fit_columns_on_grid_load=True)
-    sel = grid.get("selected_rows", [])
-    if sel:
-        selected_product = sel[0]["product_gr"]
-        if selected_product in eligible_list:
-            st.session_state["product_select"] = selected_product
-            st.rerun()
-        else:
-            st.info(f"Selected '{selected_product}' isn’t eligible for the plots (insufficient observations).")
+def render_clickable_table(title: str, df_in: pd.DataFrame, percent_col: str, price_col: str,
+                           product_name_color: str, key_prefix: str, eligible: list):
+    st.markdown(f"**{title}**")
+    if df_in.empty:
+        st.info("No data for this period."); return
 
-# -------- App --------
+    # Stats for conditional color mapping
+    pmin, pmax = float(df_in[percent_col].min()), float(df_in[percent_col].max())
+    amin, amax = float(df_in[price_col].min()), float(df_in[price_col].max())
+
+    # Header
+    c_prod, c_btn, c_pct, c_avg = st.columns([2.6, 1.2, 1.4, 1.4])
+    c_prod.markdown("**product**"); c_btn.markdown("** **")
+    c_pct.markdown(f"**{percent_col}**"); c_avg.markdown(f"**{price_col}**")
+
+    # Rows
+    for i, row in df_in.iterrows():
+        prod = str(row["product_gr"])
+        pct = float(row[percent_col])
+        avg = float(row[price_col])
+
+        pct_color = _color_high_green_low_red(pct, pmin, pmax)     # high % = green, low = red
+        avg_color = _color_low_green_high_red(avg, amin, amax)     # low price = green, high = red
+
+        col1, col2, col3, col4 = st.columns([2.6, 1.2, 1.4, 1.4])
+        col1.markdown(f"<span style='color:{product_name_color}; font-weight:600'>{prod}</span>", unsafe_allow_html=True)
+        with col2:
+            _row_button_select(prod, f"{key_prefix}_{i}_{prod}", eligible)
+        col3.markdown(f"<span style='color:{pct_color}'>{pct:.1f}%</span>", unsafe_allow_html=True)
+        col4.markdown(f"<span style='color:{avg_color}'>{avg:.3f}</span>", unsafe_allow_html=True)
+
+# ---------------------- App ----------------------
 df = load_data()
 prods = eligible_products(df)
 if not prods:
@@ -292,52 +260,43 @@ droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
 top_cols = st.columns([4, 4, 3.5])
 
 with top_cols[0]:
-    st.markdown(f"**Biggest % drops ({mode.lower()})**")
     d_disp = droppers.rename(columns={"pct_change":"drop %","cur_avg":"avg price (€)"})
-    if AGGRID_AVAILABLE:
-        aggrid_movers_table(d_disp[["product_gr","drop %","avg price (€)"]],
-                            percent_col="drop %", price_col="avg price (€)",
-                            product_color="green", eligible_list=prods, height=260)
-    else:
-        st.info("For double-click selection, add `streamlit-aggrid` to requirements.")
-        # fallback styling
-        sty = (d_disp.style
-               .format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"})
-               .apply(lambda s: ['color: green']*len(s), subset=["product_gr"]))
-        st.dataframe(sty, use_container_width=True, hide_index=True)
+    render_clickable_table(f"Biggest % drops ({mode.lower()})", d_disp[["product_gr","drop %","avg price (€)"]],
+                           percent_col="drop %", price_col="avg price (€)",
+                           product_name_color="green", key_prefix="drop", eligible=prods)
 
 with top_cols[1]:
-    st.markdown(f"**Biggest % rises ({mode.lower()})**")
     r_disp = risers.rename(columns={"pct_change":"rise %","cur_avg":"avg price (€)"})
-    if AGGRID_AVAILABLE:
-        aggrid_movers_table(r_disp[["product_gr","rise %","avg price (€)"]],
-                            percent_col="rise %", price_col="avg price (€)",
-                            product_color="red", eligible_list=prods, height=260)
-    else:
-        st.info("For double-click selection, add `streamlit-aggrid` to requirements.")
-        sty = (r_disp.style
-               .format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"})
-               .apply(lambda s: ['color: red']*len(s), subset=["product_gr"]))
-        st.dataframe(sty, use_container_width=True, hide_index=True)
+    render_clickable_table(f"Biggest % rises ({mode.lower()})", r_disp[["product_gr","rise %","avg price (€)"]],
+                           percent_col="rise %", price_col="avg price (€)",
+                           product_name_color="red", key_prefix="rise", eligible=prods)
 
 with top_cols[2]:
     st.markdown("### Variance score")
     vr = fluctuation_ranking(df)
     vr_small = vr[["product_gr", "variance_score"]].rename(columns={"variance_score":"score"})
-    # compact width
-    def _shorten(text, maxlen=26):
-        s = str(text);  return s if len(s) <= maxlen else s[:maxlen-1] + "…"
-    vr_small_display = vr_small.copy()
-    vr_small_display["product_gr"] = vr_small_display["product_gr"].map(lambda s: _shorten(s, 26))
-    if AGGRID_AVAILABLE:
-        aggrid_variance_table(vr_small_display, eligible_list=prods, height=260)
-    else:
-        st.info("For double-click selection, add `streamlit-aggrid` to requirements.")
-        st.dataframe(vr_small_display, use_container_width=True, hide_index=True)
+    # Show a compact clickable list (top 12)
+    header = st.columns([2.6, 1.2])
+    header[0].markdown("**product**"); header[1].markdown("**score**")
+    vs = vr_small.head(12).reset_index(drop=True)
+    smin, smax = float(vs["score"].min()), float(vs["score"].max())
+    for i, row in vs.iterrows():
+        prod = str(row["product_gr"]); score = float(row["score"])
+        cols = st.columns([2.6, 1.2])
+        cols[0].markdown(f"<span style='font-weight:600'>{prod}</span>", unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(f"<span style='color:{_color_high_green_low_red(score, smin, smax)}'>{score:.4f}</span>",
+                        unsafe_allow_html=True)
+        # Button row beneath name/score to keep width tight
+        bcols = st.columns([2.6, 1.2])
+        with bcols[0]:
+            pass
+        with bcols[1]:
+            _row_button_select(prod, f"var_{i}_{prod}", prods)
 
 st.caption(f"Comparing {mode.lower()} averages: current {cur_range[0]} → {cur_range[1]} vs previous {prev_range[0]} → {prev_range[1]}")
 
-# Selector (drives plots). Will be set by AgGrid double-click via session_state.
+# Selector (drives plots); buttons set st.session_state["product_select"]
 if "product_select" not in st.session_state or st.session_state["product_select"] not in prods:
     st.session_state["product_select"] = prods[0]
 product = st.selectbox("product_gr", prods,
@@ -355,7 +314,7 @@ with cols[0]:
     y2023 = st.checkbox("2023", True)
     y2024 = st.checkbox("2024", True)
     y2025 = st.checkbox("2025", True)
-    for y, flag in zip([2021, 2022, 2023, 2024, 2025], [y2021, y2022, y2023, y2024, y2025]):
+    for y, flag in zip(YEARS, [y2021, y2022, y2023, y2024, y2025]):
         if flag: years_on.add(y)
 
 with cols[1]:
@@ -386,17 +345,11 @@ with season_cols[0]:
 
     with table_col:
         dd = df[(df["product_gr"] == product) & (df["obs_date"].dt.year.isin(list(years_on_season)))]
-        def add_season_column(df_in: pd.DataFrame) -> pd.DataFrame:
-            m = df_in["obs_date"].dt.month
-            season = pd.Series(np.select(
-                [m.isin([12,1,2]), m.isin([3,4,5]), m.isin([6,7,8]), m.isin([9,10,11])],
-                ["Winter", "Spring", "Summer", "Autumn"], default="Unknown"
-            ), index=df_in.index, name="season")
-            out = df_in.copy(); out["season"] = season; return out
         dd = add_season_column(dd)
 
         seasons = ["Winter", "Spring", "Summer", "Autumn"]
         tbl = dd.groupby("season").agg(count=("price_mid", "size"), price_mid_avg=("price_mid", "mean")).reindex(seasons).fillna(0)
+
         # price text color: low=green, high=red
         def _text_color_green_to_red(series: pd.Series):
             vmin, vmax = series.min(), series.max()
@@ -409,6 +362,7 @@ with season_cols[0]:
                     r = int(220 * t); g = int(153 * (1 - t))
                     styles.append(f"color: rgb({r},{g},0)")
             return styles
+
         styled_season = (tbl.style
                          .format({"price_mid_avg": "{:.3f}", "count": "{:,.0f}"})
                          .apply(_text_color_green_to_red, subset=["price_mid_avg"]))
@@ -422,12 +376,14 @@ with season_cols[0]:
             mon_tbl = dd.groupby("month_num").agg(count=("price_mid","size"), price_mid_avg=("price_mid","mean")).reindex(range(1,13)).reset_index()
             mon_tbl["month"] = mon_tbl["month_num"].map(month_names)
             mon_tbl = mon_tbl[["month","count","price_mid_avg"]]
+
             def _month_text_colors(s: pd.Series):
                 season_color = {"Jan":"#ADD8E6","Feb":"#ADD8E6","Dec":"#ADD8E6",
                                 "Mar":"#90EE90","Apr":"#90EE90","May":"#90EE90",
                                 "Jun":"#FF7F7F","Jul":"#FF7F7F","Aug":"#FF7F7F",
                                 "Sep":"#FFD580","Oct":"#FFD580","Nov":"#FFD580"}
                 return [f"color: {season_color.get(v, 'inherit')}" for v in s]
+
             styled_month = (mon_tbl.style
                             .format({"price_mid_avg":"{:.3f}","count":"{:,.0f}"})
                             .apply(_month_text_colors, subset=["month"])
