@@ -259,6 +259,7 @@ with top_cols[0]:
               .apply(_text_color_red_to_green, subset=["drop %"])
               .apply(_text_color_green_to_red, subset=["avg price (€)"]))
 
+    st.dataframe(d_disp, use_container_width=True, hide_index=True)
 
 with top_cols[1]:
     st.markdown(f"**Biggest % rises ({mode.lower()})**")
@@ -390,4 +391,5 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
 
