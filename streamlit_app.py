@@ -53,22 +53,43 @@ def eligible_products(d: pd.DataFrame) -> list:
 
 @st.cache_data
 def fluctuation_ranking(d: pd.DataFrame) -> pd.DataFrame:
+    # Base fluctuation components
     g = d.groupby("product_gr")["price_mid"]
     n = g.size().rename("n_obs")
     q75, q25 = g.quantile(0.75), g.quantile(0.25)
     robust_std = (0.7413 * (q75 - q25)).rename("robust_std").fillna(0.0)
     weight = (1 - np.exp(-n / 180.0)).rename("weight")
     base_score = (robust_std * weight).rename("fluctuation_score")
+
+    # Penalize series with few DISTINCT price LEVEL CHANGES (step-like pricing)
+    def change_ratio(series: pd.Series) -> float:
+        x = series.dropna().values
+        if len(x) <= 1:
+            return 0.0
+        med = float(np.nanmedian(x)) if len(x) else 0.0
+        tol = max(0.01, 0.01 * med)  # 1% of median or 0.01 abs
+        diffs = np.abs(np.diff(x))
+        changes = int((diffs > tol).sum())
+        return changes / max(len(x) - 1, 1)
+
+    df_sorted = d.sort_values(["product_gr", "obs_date"])
+    churn = df_sorted.groupby("product_gr")["price_mid"].apply(change_ratio).rename("change_ratio")
+    churn_weight = (churn.clip(0, 1) ** 0.7).rename("churn_weight")  # concave: modest changes still matter
+
+    # Favor more observations (diminishing returns)
     n_max = max(float(n.max()), 1.0)
     obs_boost = (np.log1p(n) / np.log1p(n_max)).rename("obs_boost")
-    variance_score = (base_score * obs_boost).rename("variance_score")
-    out = pd.concat([n, robust_std, weight, base_score, obs_boost, variance_score], axis=1).reset_index()
+
+    variance_score = (base_score * obs_boost * churn_weight).rename("variance_score")
+
+    out = pd.concat([n, robust_std, weight, base_score, obs_boost, churn, churn_weight, variance_score], axis=1).reset_index()
     return out.sort_values("variance_score", ascending=False)
 
 def plot_overlapped_with_forecast(ax, dd: pd.DataFrame, product_gr: str, years_on: set):
     dsel = dd[(dd["product_gr"] == product_gr) & (dd["obs_date"].dt.year.isin(YEARS))].copy()
     if dsel.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
+
     X_train = _fourier_features(dsel["obs_date"])
     y_train = dsel["price_mid"].to_numpy()
     model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=1.0)).fit(X_train, y_train)
@@ -189,17 +210,10 @@ def compute_top_movers(data: pd.DataFrame, mode: str):
     m = m[m["prev_avg"] > 0]
     m["pct_change"] = (m["cur_avg"] - m["prev_avg"]) / m["prev_avg"] * 100.0
 
-    risers = (m[m["pct_change"] > 0]
-              .sort_values("pct_change", ascending=False)
-              .head(5)
-              .reset_index())
+    risers = (m[m["pct_change"] > 0].sort_values("pct_change", ascending=False).head(5).reset_index())
     risers = risers[["product_gr", "pct_change", "cur_avg"]]
 
-    droppers = (m[m["pct_change"] < 0]
-                .sort_values("pct_change", ascending=True)
-                .head(5)
-                .reset_index())
-    # show magnitude as positive % for drops
+    droppers = (m[m["pct_change"] < 0].sort_values("pct_change", ascending=True).head(5).reset_index())
     droppers["pct_change"] = -droppers["pct_change"]
     droppers = droppers[["product_gr", "pct_change", "cur_avg"]]
 
@@ -223,13 +237,21 @@ top_cols = st.columns([4, 4, 3])
 with top_cols[0]:
     st.markdown(f"**Biggest % drops ({mode.lower()})**")
     d_disp = droppers.rename(columns={"product_gr":"product_gr","pct_change":"drop %","cur_avg":"avg price (€)"})
-    d_disp = d_disp.style.format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"}).apply(_green_text, subset=["product_gr"])
+    d_disp = (d_disp.style
+              .format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(_green_text, subset=["product_gr"])
+              .apply(_text_color_green_to_red, subset=["drop %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
     st.dataframe(d_disp, use_container_width=True, hide_index=True)
 
 with top_cols[1]:
     st.markdown(f"**Biggest % rises ({mode.lower()})**")
     r_disp = risers.rename(columns={"product_gr":"product_gr","pct_change":"rise %","cur_avg":"avg price (€)"})
-    r_disp = r_disp.style.format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"}).apply(_red_text, subset=["product_gr"])
+    r_disp = (r_disp.style
+              .format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(_red_text, subset=["product_gr"])
+              .apply(_text_color_green_to_red, subset=["rise %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
     st.dataframe(r_disp, use_container_width=True, hide_index=True)
 
 with top_cols[2]:
@@ -277,7 +299,7 @@ with cols[1]:
 
 with cols[2]:
     fig2, ax2 = plt.subplots(figsize=(10.5, 5.8))
-    plot_clustered_seasonal(ax2, df, product, years_on)  # now respects year toggles
+    plot_clustered_seasonal(ax2, df, product, years_on)  # respects year toggles
     st.pyplot(fig2, clear_figure=True)
 
 # ---- Counts by season + monthly table + seasonal average price bar plot ----
