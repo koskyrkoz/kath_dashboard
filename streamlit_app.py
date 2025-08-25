@@ -170,6 +170,22 @@ def _text_color_green_to_red(series: pd.Series):
             styles.append(f"color: rgb({r},{g},0)")
     return styles
 
+def _text_color_red_to_green(series: pd.Series):
+    # low = red, high = green
+    vmin, vmax = series.min(), series.max()
+    rng = (vmax - vmin) if pd.notna(vmax) and pd.notna(vmin) else 0.0
+    styles = []
+    for v in series:
+        if rng == 0 or pd.isna(v):
+            styles.append("color: inherit")
+        else:
+            t = float((v - vmin) / rng)  # 0→low ... 1→high
+            r = int(220 * (1 - t))
+            g = int(153 * t)
+            styles.append(f"color: rgb({r},{g},0)")
+    return styles
+
+
 def _month_text_colors(s: pd.Series):
     season_color = {"Jan":"#4EA3E6","Feb":"#4EA3E6","Dec":"#4EA3E6",
                     "Mar":"#66C97A","Apr":"#66C97A","May":"#66C97A",
@@ -240,9 +256,9 @@ with top_cols[0]:
     d_disp = (d_disp.style
               .format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"})
               .apply(_green_text, subset=["product_gr"])
-              .apply(_text_color_green_to_red, subset=["drop %"])
+              .apply(_text_color_red_to_green, subset=["drop %"])
               .apply(_text_color_green_to_red, subset=["avg price (€)"]))
-    st.dataframe(d_disp, use_container_width=True, hide_index=True)
+
 
 with top_cols[1]:
     st.markdown(f"**Biggest % rises ({mode.lower()})**")
@@ -250,8 +266,9 @@ with top_cols[1]:
     r_disp = (r_disp.style
               .format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"})
               .apply(_red_text, subset=["product_gr"])
-              .apply(_text_color_green_to_red, subset=["rise %"])
+              .apply(_text_color_red_to_green, subset=["rise %"])
               .apply(_text_color_green_to_red, subset=["avg price (€)"]))
+
     st.dataframe(r_disp, use_container_width=True, hide_index=True)
 
 with top_cols[2]:
@@ -373,3 +390,4 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
