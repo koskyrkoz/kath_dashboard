@@ -649,10 +649,6 @@ else:
                         .apply(_corr_color, subset=["r_0lag"]))
             st.dataframe(styled_s, use_container_width=True, hide_index=True, height=420)
 
-        
-
-        
-
 
 # Bottom summary
 dd_all = df[df["product_gr"] == product]
