@@ -234,7 +234,7 @@ if not prods:
 
 # ---------- TOP SEGMENT ----------
 st.markdown("## Top Movers")
-mode = st.radio("Period", ["Week", "Month"], horizontal=True)
+mode = st.radio("Period", ["Month", "Week"], horizontal=True)
 droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
 
 top_cols = st.columns([4, 4, 3.5])
@@ -388,3 +388,4 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
+
