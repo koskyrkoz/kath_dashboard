@@ -220,6 +220,140 @@ def _text_color_red_to_green(series: pd.Series):
             out.append(f"color: rgb({r},{g},0)")  # high=green, low=red
     return out
 
+def plot_supply_by_year(ax, dfin: pd.DataFrame, product_gr: str, years_on: set, value_col: str, ylabel: str):
+    if value_col not in dfin.columns:
+        ax.text(0.5, 0.5, f"Missing column: {value_col}", ha="center", va="center")
+        return
+    xsel = dfin[(dfin["product_gr"] == product_gr) & (dfin["obs_date"].dt.year.isin(years_on))].copy()
+    if xsel.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
+
+    xsel[value_col] = pd.to_numeric(xsel[value_col], errors="coerce")
+    # don't draw 0 or NaN → break lines
+    xsel.loc[(xsel[value_col] <= 0) | (xsel[value_col].isna()), value_col] = np.nan
+
+    for y in sorted(years_on):
+        seg = xsel[xsel["obs_date"].dt.year == y].sort_values("obs_date")
+        if seg[value_col].notna().sum() >= 2:
+            ax.plot(_to_2000(seg["obs_date"]), seg[value_col], label=str(y))
+
+    _month_axis(ax)
+    ax.set_xlabel("month")
+    ax.set_ylabel(ylabel)
+    ax.legend()
+
+def _cluster_centroid_by_week(dfin: pd.DataFrame, product_gr: str, years_on: set, value_col: str):
+    x = dfin[(dfin["product_gr"] == product_gr) & (dfin["obs_date"].dt.year.isin(list(years_on)))].copy()
+    if value_col != "price_mid":
+        x[value_col] = pd.to_numeric(x[value_col], errors="coerce")
+        x.loc[(x[value_col] <= 0) | (x[value_col].isna()), value_col] = np.nan
+    if x.empty or x[value_col].notna().sum() < 3:
+        return None, None
+    x["year"] = x["obs_date"].dt.year
+    x["week"] = x["obs_date"].dt.isocalendar().week.astype(int)
+    wk = x.groupby(["year", "week"])[value_col].median().reset_index()
+    M = wk.pivot_table(index="year", columns="week", values=value_col, aggfunc="mean").reindex(columns=range(1,54))
+    M = M.apply(lambda r: r.interpolate(limit_direction="both"), axis=1).apply(lambda r: r.fillna(r.mean()), axis=1)
+
+    if len(M) >= 2:
+        Xn = ((M.sub(M.mean(axis=1), axis=0)).div(M.std(axis=1).replace(0, np.nan), axis=0)).fillna(0)
+        from sklearn.cluster import KMeans
+        labels = KMeans(n_clusters=min(2, len(M)), n_init=10, random_state=0).fit_predict(Xn)
+        centroid = M[labels == pd.Series(labels).value_counts().idxmax()].mean(axis=0)
+    else:
+        centroid = M.mean(axis=0)
+
+    base = pd.to_datetime("2000-01-03")
+    dates = [base + pd.Timedelta(weeks=w-1) for w in centroid.index]
+    y = pd.Series(centroid.values).rolling(3, center=True).mean().bfill().ffill().values
+    return dates, y
+
+def _rescale_to_range(y: np.ndarray, target_min: float, target_max: float):
+    y = np.asarray(y, dtype=float)
+    y_min, y_max = np.nanmin(y), np.nanmax(y)
+    if not np.isfinite(y_min) or not np.isfinite(y_max) or (y_max - y_min) == 0 or (target_max - target_min) == 0:
+        return None
+    y01 = (y - y_min) / (y_max - y_min)
+    return y01 * (target_max - target_min) + target_min
+
+
+def plot_clustered_supply(ax, dfin: pd.DataFrame, product_gr: str, years_on: set,
+                          qty_col: str, overlay_price: bool = True):
+    dates_s, y_s = _cluster_centroid_by_week(dfin, product_gr, years_on, qty_col)
+    if dates_s is None:
+        ax.text(0.5, 0.5, "No supply data", ha="center", va="center"); return
+    ax.plot(dates_s, y_s, label="supply centroid (kg)")
+
+    if overlay_price:
+        dates_p, y_p = _cluster_centroid_by_week(dfin, product_gr, years_on, "price_mid")
+        if dates_p is not None:
+            y_p_scaled = _rescale_to_range(y_p, float(np.nanmin(y_s)), float(np.nanmax(y_s)))
+            if y_p_scaled is not None:
+                ax.plot(dates_p, y_p_scaled, alpha=0.5, label="price centroid (normalized)")
+
+    _month_axis(ax)
+    ax.set_xlabel("month")
+    ax.set_ylabel("kg")
+    ax.legend()
+
+# --- helpers ---
+def _qty_col(df: pd.DataFrame) -> str | None:
+    if "quantity_to_supply_kg" in df.columns: return "quantity_to_supply_kg"
+    if "quantity_to_suply_kg"  in df.columns: return "quantity_to_suply_kg"
+    return None
+
+def _weekly_pair(df: pd.DataFrame, product: str, qty_col: str, deseason: bool = True) -> pd.DataFrame:
+    x = df[df["product_gr"] == product][["obs_date", "price_mid", qty_col]].copy()
+    x[qty_col] = pd.to_numeric(x[qty_col], errors="coerce")
+    x.loc[(x[qty_col] <= 0) | (x[qty_col].isna()), qty_col] = np.nan  # 0/NaN → gaps
+    w = (x.set_index("obs_date")
+           .resample("W-MON")
+           .median()
+           .rename(columns={qty_col: "qty", "price_mid": "price"})
+           .dropna(how="all"))
+    if deseason and len(w) >= 8:
+        m = w.index.month
+        w["price"] = w["price"] - pd.Series(w["price"]).groupby(m).transform("mean")
+        w["qty"]   = w["qty"]   - pd.Series(w["qty"]).groupby(m).transform("mean")
+    return w.dropna()
+
+def _corr_at_lag(w: pd.DataFrame, lag_weeks: int, method: str = "pearson") -> tuple[float, int]:
+    # corr(price_t, qty_{t-lag}); positive lag → qty leads price
+    if lag_weeks != 0:
+        w = w.copy()
+        w["qty"] = w["qty"].shift(lag_weeks)
+    v = w[["price", "qty"]].dropna()
+    if len(v) < 6: return np.nan, 0
+    r = v["price"].corr(v["qty"], method=method)
+    return float(r), len(v)
+
+def correlation_leaderboard(df: pd.DataFrame,
+                            method: str = "pearson",
+                            deseason: bool = True,
+                            max_lag_weeks: int = 8) -> pd.DataFrame:
+    qcol = _qty_col(df)
+    if not qcol: raise ValueError("quantity_to_supply column not found")
+    out = []
+    for prod, dsub in df.groupby("product_gr"):
+        w = _weekly_pair(df, prod, qcol, deseason=deseason)
+        if w.empty: 
+            continue
+        best = {"r": np.nan, "lag": 0, "n": 0}
+        for L in range(-max_lag_weeks, max_lag_weeks + 1):
+            r, n = _corr_at_lag(w, L, method=method)
+            if np.isnan(r): 
+                continue
+            if (np.isnan(best["r"])) or (abs(r) > abs(best["r"])):
+                best = {"r": r, "lag": L, "n": n}
+        r0, n0 = _corr_at_lag(w, 0, method=method)
+        out.append({"product_gr": prod, "r_best": best["r"], "lag_best_w": best["lag"], 
+                    "n_pairs_best": best["n"], "r_0lag": r0, "n_pairs_0lag": n0})
+    res = pd.DataFrame(out).dropna(subset=["r_best"]).sort_values("r_best", ascending=False)
+    return res.reset_index(drop=True)
+
+
+
+
 # ================== APP ==================
 df = load_data()
 
@@ -233,8 +367,8 @@ if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
 # ---------- TOP SEGMENT ----------
-st.markdown("## Key products")
-mode = st.radio("Period", ["Month", "Week"], horizontal=True)
+st.markdown("## Top Movers")
+mode = st.radio("Period", ["Week", "Month"], horizontal=True)
 droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
 
 top_cols = st.columns([4, 4, 3.5])
@@ -376,6 +510,150 @@ with season_cols[1]:
         ax_price.set_title(f"Seasonal average price — {product}")
         st.pyplot(fig3, clear_figure=True)
 
+# ---- Supply by year (updated) ----
+st.markdown("---")
+st.subheader("Supply by year")
+
+QTY_COL = "quantity_to_supply_kg" if "quantity_to_supply_kg" in df.columns else (
+          "quantity_to_suply_kg"  if "quantity_to_suply_kg"  in df.columns else None)
+
+years_available = sorted(df.loc[df["product_gr"] == product, "obs_date"].dt.year.dropna().unique().tolist())
+
+if not years_available:
+    st.info("No dated observations for this product.")
+else:
+    sup_cols = st.columns([2, 7, 7])  # years on the left now
+
+    with sup_cols[0]:
+        st.markdown("**Years**")
+        years_on_supply = set()
+        for y in years_available:
+            if st.checkbox(str(int(y)), True, key=f"supyear_{y}"):
+                years_on_supply.add(int(y))
+        
+
+    with sup_cols[1]:
+        fig_s1, ax_s1 = plt.subplots(figsize=(10, 4.6))
+        if not years_on_supply:
+            ax_s1.text(0.5, 0.5, "Select at least one year", ha="center", va="center")
+        elif not QTY_COL:
+            ax_s1.text(0.5, 0.5, "Missing column: quantity_to_supply_kg", ha="center", va="center")
+        else:
+            plot_supply_by_year(ax_s1, df, product, years_on_supply, QTY_COL, "kg")
+            ax_s1.set_title(f"Quantity to supply (kg) — {product}")
+        st.pyplot(fig_s1, clear_figure=True)
+
+    with sup_cols[2]:
+        hide_price = st.checkbox("Hide price", value=False, key="hide_price_supply")
+        fig_s2, ax_s2 = plt.subplots(figsize=(10, 4.6))
+        if not years_on_supply:
+            ax_s2.text(0.5, 0.5, "Select at least one year", ha="center", va="center")
+        elif not QTY_COL:
+            ax_s2.text(0.5, 0.5, "Missing column: quantity_to_supply_kg", ha="center", va="center")
+        else:
+            plot_clustered_supply(ax_s2, df, product, years_on_supply, QTY_COL, overlay_price=not hide_price)
+            ax_s2.set_title(f"Clustered supply seasonal profile — {product}")
+        st.pyplot(fig_s2, clear_figure=True)
+    
+# ---- Price ↔ Supply correlation (APP segment) ----
+st.markdown("---")
+st.subheader("Price ↔ Supply correlation")
+
+# Guard: require a quantity-to-supply column
+qcol = _qty_col(df) if ' _qty_col' in globals() else (
+    "quantity_to_supply_kg" if "quantity_to_supply_kg" in df.columns else
+    ("quantity_to_suply_kg" if "quantity_to_suply_kg" in df.columns else None)
+)
+if qcol is None:
+    st.info("Missing quantity_to_supply_kg column (or quantity_to_suply_kg).")
+else:
+    # Controls
+    cc = st.columns([2, 2, 2, 2])
+    with cc[0]:
+        deseason = st.checkbox("De-seasonalize (remove monthly means)", True)
+    with cc[1]:
+        max_lag = st.slider("Max lag (weeks)", 0, 12, 8, step=1,
+                            help="Search best correlation with supply leading/lagging price by up to ±N weeks.")
+    with cc[2]:
+        min_pairs = st.slider("Min overlapping pairs", 6, 60, 12, step=2,
+                              help="Only show products with at least this many weekly pairs for the best-lag correlation.")
+    with cc[3]:
+        show_spearman = st.checkbox("Also show Spearman tab", True)
+
+    # Compute Pearson leaderboard once
+    with st.spinner("Computing Pearson correlations…"):
+        lb = correlation_leaderboard(df, method="pearson", deseason=deseason, max_lag_weeks=max_lag)
+    lb = lb[lb["n_pairs_best"] >= min_pairs].reset_index(drop=True)
+
+    # Styling helpers (color correlations: -1=red … +1=green)
+    def _corr_color(series: pd.Series):
+        out = []
+        for v in series:
+            if pd.isna(v):
+                out.append("color: inherit")
+            else:
+                t = (float(v) + 1.0) / 2.0  # map [-1,1]→[0,1]
+                r = int(220 * (1 - t)); g = int(153 * t)
+                out.append(f"color: rgb({r},{g},0)")
+        return out
+
+    tabs = st.tabs(["Leaderboard (Pearson)", "Top ± (Pearson)"] + (["Leaderboard (Spearman)"] if show_spearman else []))
+
+    # --- Example 1: Leaderboard (Pearson) ---
+    with tabs[0]:
+        st.caption("Correlation is computed on weekly medians; positive lag means supply **leads** price.")
+        cols_order = ["product_gr", "r_best", "lag_best_w", "n_pairs_best", "r_0lag", "n_pairs_0lag"]
+        df_show = lb[cols_order].copy()
+        styled = (df_show.style
+                  .format({"r_best": "{:+.3f}", "r_0lag": "{:+.3f}", "lag_best_w": "{:+.0f}", 
+                           "n_pairs_best": "{:.0f}", "n_pairs_0lag": "{:.0f}"})
+                  .apply(_corr_color, subset=["r_best"])
+                  .apply(_corr_color, subset=["r_0lag"]))
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+
+    # --- Example 2: Top 10 positive/negative (Pearson) ---
+    with tabs[1]:
+        cL, cR = st.columns(2)
+        top_pos = lb.sort_values("r_best", ascending=False).head(10)[["product_gr","r_best","lag_best_w","n_pairs_best"]]
+        top_neg = lb.sort_values("r_best", ascending=True).head(10)[["product_gr","r_best","lag_best_w","n_pairs_best"]]
+        with cL:
+            st.markdown("**Most positively correlated**")
+            st.dataframe(
+                top_pos.style
+                    .format({"r_best":"{:+.3f}","lag_best_w":"{:+.0f}","n_pairs_best":"{:.0f}"})
+                    .apply(_corr_color, subset=["r_best"]),
+                use_container_width=True, hide_index=True
+            )
+        with cR:
+            st.markdown("**Most negatively correlated**")
+            st.dataframe(
+                top_neg.style
+                    .format({"r_best":"{:+.3f}","lag_best_w":"{:+.0f}","n_pairs_best":"{:.0f}"})
+                    .apply(_corr_color, subset=["r_best"]),
+                use_container_width=True, hide_index=True
+            )
+        st.caption("Tip: Positive lag ⇒ supply leads price; negative lag ⇒ supply lags price.")
+
+    # --- Example 3: Leaderboard (Spearman) ---
+    if show_spearman:
+        with tabs[2]:
+            with st.spinner("Computing Spearman correlations…"):
+                lbs = correlation_leaderboard(df, method="spearman", deseason=deseason, max_lag_weeks=max_lag)
+            lbs = lbs[lbs["n_pairs_best"] >= min_pairs].reset_index(drop=True)
+            cols_order = ["product_gr", "r_best", "lag_best_w", "n_pairs_best", "r_0lag", "n_pairs_0lag"]
+            df_show_s = lbs[cols_order].copy()
+            styled_s = (df_show_s.style
+                        .format({"r_best": "{:+.3f}", "r_0lag": "{:+.3f}", "lag_best_w": "{:+.0f}",
+                                 "n_pairs_best": "{:.0f}", "n_pairs_0lag": "{:.0f}"})
+                        .apply(_corr_color, subset=["r_best"])
+                        .apply(_corr_color, subset=["r_0lag"]))
+            st.dataframe(styled_s, use_container_width=True, hide_index=True, height=420)
+
+        
+
+        
+
+
 # Bottom summary
 dd_all = df[df["product_gr"] == product]
 years_present = sorted(dd_all["obs_date"].dt.year.unique().tolist())
@@ -387,6 +665,4 @@ c1.metric("Observations", f"{len(dd_all):,}")
 c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_present else "—")
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
-st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
-
-
+st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")  
