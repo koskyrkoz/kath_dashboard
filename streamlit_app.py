@@ -190,11 +190,9 @@ def compute_top_movers(data: pd.DataFrame, mode: str):
 
     risers = (m[m["pct_change"] > 0].sort_values("pct_change", ascending=False).head(5).reset_index())
     risers = risers[["product_gr", "pct_change", "cur_avg"]]
-
     droppers = (m[m["pct_change"] < 0].sort_values("pct_change", ascending=True).head(5).reset_index())
     droppers["pct_change"] = -droppers["pct_change"]
     droppers = droppers[["product_gr", "pct_change", "cur_avg"]]
-
     return droppers, risers, (cur_start.date(), cur_end.date()), (prev_start.date(), prev_end.date())
 
 # ---------- styling helpers ----------
@@ -222,59 +220,15 @@ def _text_color_red_to_green(series: pd.Series):
             out.append(f"color: rgb({r},{g},0)")  # high=green, low=red
     return out
 
-# ---------- compact select button ----------
-def _row_button_select(product: str, key: str, eligible: list):
-    btn = st.button("↪", key=key, use_container_width=True, help="Select product")
-    if btn:
-        if product in eligible:
-            st.session_state["product_select"] = product
-            st.rerun()
-        else:
-            st.warning(f"'{product}' doesn’t meet the minimum observation threshold.")
-
-def render_clickable_table(title: str, df_in: pd.DataFrame, percent_col: str, price_col: str,
-                           product_name_color: str, key_prefix: str, eligible: list):
-    st.markdown(f"**{title}**")
-    if df_in.empty:
-        st.info("No data for this period."); return
-
-    # Stats for conditional color mapping
-    pmin, pmax = float(df_in[percent_col].min()), float(df_in[percent_col].max())
-    amin, amax = float(df_in[price_col].min()), float(df_in[price_col].max())
-
-    # Header (tighter)
-    c_prod, c_btn, c_pct, c_avg = st.columns([2.7, 0.6, 1.5, 1.5])
-    c_prod.markdown("**product**"); c_btn.markdown("** **")
-    c_pct.markdown(f"**{percent_col}**"); c_avg.markdown(f"**{price_col}**")
-
-    # Rows (tighter)
-    for i, row in df_in.iterrows():
-        prod = str(row["product_gr"])
-        pct = float(row[percent_col])
-        avg = float(row[price_col])
-
-        # % high=green / low=red ; price low=green / high=red
-        if pmax == pmin:
-            pct_color = "inherit"
-        else:
-            t = (pct - pmin) / (pmax - pmin)
-            pct_color = f"rgb({int(220*(1-t))},{int(153*t)},0)"
-        if amax == amin:
-            avg_color = "inherit"
-        else:
-            t2 = (avg - amin) / (amax - amin)
-            avg_color = f"rgb({int(220*t2)},{int(153*(1-t2))},0)"
-
-        col1, col2, col3, col4 = st.columns([2.7, 0.6, 1.5, 1.5])
-        col1.markdown(f"<span style='color:{product_name_color}; font-weight:600'>{prod}</span>", unsafe_allow_html=True)
-        with col2:
-            _row_button_select(prod, f"{key_prefix}_{i}_{prod}", eligible)
-        col3.markdown(f"<span style='color:{pct_color}'>{pct:.1f}%</span>", unsafe_allow_html=True)
-        col4.markdown(f"<span style='color:{avg_color}'>{avg:.3f}</span>", unsafe_allow_html=True)
-
 # ================== APP ==================
 df = load_data()
-prods = eligible_products(df)
+
+# Compute eligible products and sort the dropdown by variance score (DESC)
+prods_eligible = eligible_products(df)
+vr_global = fluctuation_ranking(df)
+ranked = vr_global["product_gr"].tolist()
+prods = [p for p in ranked if p in prods_eligible]  # ordered by variance score
+
 if not prods:
     st.error("No products meet the minimum observation threshold."); st.stop()
 
@@ -286,32 +240,28 @@ droppers, risers, cur_range, prev_range = compute_top_movers(df, mode)
 top_cols = st.columns([4, 4, 3.5])
 
 with top_cols[0]:
+    st.markdown(f"**Biggest % drops ({mode.lower()})**")
     d_disp = droppers.rename(columns={"pct_change":"drop %","cur_avg":"avg price (€)"})
-    render_clickable_table(f"Biggest % drops ({mode.lower()})",
-                           d_disp[["product_gr","drop %","avg price (€)"]],
-                           percent_col="drop %", price_col="avg price (€)",
-                           product_name_color="green", key_prefix="drop", eligible=prods)
+    styled = (d_disp.style
+              .format({"drop %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(lambda s: ["color: green"]*len(s), subset=["product_gr"])
+              .apply(_text_color_red_to_green, subset=["drop %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 with top_cols[1]:
+    st.markdown(f"**Biggest % rises ({mode.lower()})**")
     r_disp = risers.rename(columns={"pct_change":"rise %","cur_avg":"avg price (€)"})
-    render_clickable_table(f"Biggest % rises ({mode.lower()})",
-                           r_disp[["product_gr","rise %","avg price (€)"]],
-                           percent_col="rise %", price_col="avg price (€)",
-                           product_name_color="red", key_prefix="rise", eligible=prods)
+    styled = (r_disp.style
+              .format({"rise %":"{:.1f}%","avg price (€)":"{:.3f}"})
+              .apply(lambda s: ["color: red"]*len(s), subset=["product_gr"])
+              .apply(_text_color_red_to_green, subset=["rise %"])
+              .apply(_text_color_green_to_red, subset=["avg price (€)"]))
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 with top_cols[2]:
-    with top_cols[2]:
     st.markdown("### Variance score")
-    vr = fluctuation_ranking(df)
-    vr_small = (vr[["product_gr", "variance_score"]]
-                .rename(columns={"variance_score": "score"})
-                .head(12))
-
-    # add tiny link that sets ?prod=<product>
-    from urllib.parse import quote as _urlq
-    vr_small["↪"] = vr_small["product_gr"].apply(lambda p: f"?prod={_urlq(str(p))}")
-
-    # color the score text (low=red, high=green)
+    vr_small = vr_global[["product_gr", "variance_score"]].rename(columns={"variance_score":"score"}).head(12)
     smin, smax = float(vr_small["score"].min()), float(vr_small["score"].max())
     def _score_color(series: pd.Series):
         if smax == smin:
@@ -322,22 +272,20 @@ with top_cols[2]:
             r, g = int(220 * (1 - t)), int(153 * t)
             styles.append(f"color: rgb({r},{g},0)")
         return styles
-
     styled_vs = (vr_small.style
                  .format({"score": "{:.4f}"})
                  .apply(_score_color, subset=["score"]))
+    st.dataframe(styled_vs, use_container_width=True, hide_index=True, height=300)
 
-    st.dataframe(
-        styled_vs,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "product_gr": st.column_config.TextColumn("product", width="medium"),
-            "score": st.column_config.NumberColumn("score", format="%.4f", width="small"),
-            "↪": st.column_config.LinkColumn(" ", display_text="↪", width="small"),
-        },
-        height=300,
-    )
+st.caption(f"Comparing {mode.lower()} averages: current {cur_range[0]} → {cur_range[1]} vs previous {prev_range[0]} → {prev_range[1]}")
+
+# -------- product selector (sorted by variance score)
+if "product_select" not in st.session_state or st.session_state["product_select"] not in prods:
+    st.session_state["product_select"] = prods[0]
+product = st.selectbox("product_gr (sorted by variance score)", prods,
+                       index=prods.index(st.session_state["product_select"]),
+                       key="product_select")
+
 # -------- Main plots row: [years] | [overlapped+forecast] | [clustered seasonal]
 cols = st.columns([2, 7, 7])
 with cols[0]:
@@ -440,4 +388,3 @@ c2.metric("Years covered", f"{years_present[0]}–{years_present[-1]}" if years_
 c3.metric("Unique years", f"{len(years_present)}")
 st.write("Counts by year:", counts_by_year.to_frame("n_obs").T)
 st.caption(f"Date range: {dd_all['obs_date'].min().date() if not dd_all.empty else '—'} → {dd_all['obs_date'].max().date() if not dd_all.empty else '—'}")
-
